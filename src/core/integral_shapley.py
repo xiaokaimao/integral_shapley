@@ -6,7 +6,7 @@ This module implements efficient Shapley value computation using integral formul
 SV_i = ∫_0^1 E[Δ(t,i)] dt
 
 where Δ(t,i) = v(S_t ∪ {i}) - v(S_t) is the marginal contribution of data point i
-when added to a random coalition S_t of size ⌊t·(N-1)⌋.
+when added to a random coalition S_t of size determined by t·(N-1) using configurable rounding.
 
 Key advantages:
 1. Computational efficiency through smart sampling of t values

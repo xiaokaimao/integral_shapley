@@ -8,7 +8,7 @@ This project implements Shapley value computation using the integral formulation
 
 $$\mathcal{SV}_i = \int_0^1 \mathbb{E}[\Delta(t, i)] \, dt$$
 
-where $\Delta(t, i) = v(S_t \cup \{i\}) - v(S_t)$ represents the marginal contribution of data point $i$ when added to a random coalition $S_t$ of size $\lfloor t \cdot (N-1) \rfloor$.
+where $\Delta(t, i) = v(S_t \cup \{i\}) - v(S_t)$ represents the marginal contribution of data point $i$ when added to a random coalition $S_t$ of size determined by $t \cdot (N-1)$ using configurable rounding methods.
 
 ## Key Advantages
 
