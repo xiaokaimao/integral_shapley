@@ -15,9 +15,9 @@ from sklearn.preprocessing import StandardScaler
 # 添加src目录到路径
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from core.integral_shapley import stratified_shapley_value_with_plot
-from utils.utilities import utility_acc
-from utils.model_utils import return_model
+from src.core.integral_shapley import stratified_shapley_value_with_plot
+from src.utils.utilities import utility_acc
+from src.utils.model_utils import return_model
 
 
 def main():
