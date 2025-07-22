@@ -11,17 +11,14 @@ from sklearn.datasets import load_iris
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-# 添加src目录到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
-from core.integral_shapley import (
+from src.core.integral_shapley import (
     compute_integral_shapley_trapezoid,
     compute_integral_shapley_simpson,
     compute_integral_shapley_auto,
     stratified_shapley_value
 )
-from utils.utilities import utility_acc
-from utils.model_utils import return_model
+from src.utils.utilities import utility_acc
+from src.utils.model_utils import return_model
 
 
 def main():

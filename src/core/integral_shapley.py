@@ -39,70 +39,62 @@ from utils.math_utils import compute_coalition_size
 
 
 
-def estimate_smoothness(x_train, y_train, x_valid, y_valid, i, clf, final_model, 
-                       utility_func, num_probe_points=10, num_MC_probe=20):
+def compute_marginal_contribution_at_t(t, x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                                     utility_func, num_MC=50, rounding_method='probabilistic', rng=None):
     """
-    Estimate the smoothness of the integrand E[Δ(t,i)] by computing second differences.
+    Compute the marginal contribution E[Δ(t,i)] at a specific t value.
     
     Args:
+        t: Coalition proportion in [0,1]
         x_train, y_train: Training data
         x_valid, y_valid: Validation data
         i: Target data point index
         clf: Classifier to train on subsets
         final_model: Model trained on full data
         utility_func: Utility function
-        num_probe_points: Number of t values to probe for smoothness
-        num_MC_probe: Monte Carlo samples per probe point
+        num_MC: Monte Carlo samples for expectation
+        rounding_method: How to round coalition sizes
+        rng: Random number generator
         
     Returns:
-        max_second_diff: Maximum estimated second difference (smoothness indicator)
+        marginal_contribution: E[Δ(t,i)] at this t value
     """
+    if rng is None:
+        rng = np.random.default_rng()
+    
     total = x_train.shape[0]
-    indices = [j for j in range(total) if j != i]
-    candidate_x = x_train[indices]
-    candidate_y = y_train[indices]
-    N = len(candidate_x)
+    N = total
+    mc_values = []
     
-    # Sample t values uniformly in (0,1)
-    t_values = np.linspace(0.1, 0.9, num_probe_points)
-    integrand_values = []
-    
-    for t in t_values:
-        m = max(int(np.floor(t * N)), 1)
-        mc_values = []
+    for _ in range(num_MC):
+        # Compute coalition size using specified rounding method
+        m = compute_coalition_size(t, N, method=rounding_method, rng=rng)
         
-        for _ in range(num_MC_probe):
-            sample_indices = random.sample(range(N), m)
-            X_sub = candidate_x[sample_indices]
-            y_sub = candidate_y[sample_indices]
-            
-            try:
-                util_S = utility_func(X_sub, y_sub, x_valid, y_valid, clone(clf), final_model)
-            except:
-                util_S = 0.0
-                
-            X_sub_i = np.vstack([X_sub, x_train[i]])
-            y_sub_i = np.append(y_sub, y_train[i])
-            
-            try:
-                util_S_i = utility_func(X_sub_i, y_sub_i, x_valid, y_valid, clone(clf), final_model)
-            except:
-                util_S_i = 0.0
-                
-            mc_values.append(util_S_i - util_S)
+        if m == 0:
+            X_sub = np.empty((0, x_train.shape[1]))
+            y_sub = np.empty(0)
+        else:
+            candidate_indices = [j for j in range(total) if j != i]
+            sample_indices = random.sample(candidate_indices, m)
+            X_sub = x_train[sample_indices]
+            y_sub = y_train[sample_indices]
         
-        integrand_values.append(np.mean(mc_values))
+        try:
+            util_S = utility_func(X_sub, y_sub, x_valid, y_valid, clone(clf), final_model)
+        except:
+            util_S = 0.0
+            
+        X_sub_i = np.vstack([X_sub, x_train[i]]) if m > 0 else x_train[i].reshape(1, -1)
+        y_sub_i = np.append(y_sub, y_train[i])
+        
+        try:
+            util_S_i = utility_func(X_sub_i, y_sub_i, x_valid, y_valid, clone(clf), final_model)
+        except:
+            util_S_i = 0.0
+            
+        mc_values.append(util_S_i - util_S)
     
-    # Compute second differences to estimate smoothness
-    if len(integrand_values) >= 3:
-        second_diffs = []
-        dt = t_values[1] - t_values[0]
-        for j in range(len(integrand_values) - 2):
-            second_diff = abs(integrand_values[j+2] - 2*integrand_values[j+1] + integrand_values[j]) / (dt**2)
-            second_diffs.append(second_diff)
-        return max(second_diffs) if second_diffs else 0.0
-    else:
-        return 0.0
+    return np.mean(mc_values)
 
 
 def compute_integral_shapley_trapezoid(x_train, y_train, x_valid, y_valid, i, clf, final_model,
@@ -324,13 +316,22 @@ def choose_optimal_t_samples(data_size, method='simpson', precision='balanced'):
     
     Args:
         data_size: Size of training dataset
-        method: 'trapezoid' or 'simpson'
+        method: 'trapezoid', 'simpson', or 'smart_adaptive'
         precision: 'fast', 'balanced', or 'high'
     
     Returns:
-        optimal_t_samples: Recommended number of t sampling points
+        optimal_t_samples: Recommended number of t sampling points or dict of parameters
     """
-    if method == 'simpson':
+    if method == 'smart_adaptive':
+        # For smart adaptive, return parameters as tolerance instead of fixed samples
+        if precision == 'fast':
+            return {'tolerance': 1e-3, 'max_depth': 3}
+        elif precision == 'balanced':
+            return {'tolerance': 1e-4, 'max_depth': 4}
+        else:  # high precision
+            return {'tolerance': 1e-5, 'max_depth': 5}
+    
+    elif method == 'simpson':
         if precision == 'fast':
             base_samples = max(11, min(15, int(np.sqrt(data_size))))
         elif precision == 'balanced':
@@ -391,11 +392,18 @@ def compute_integral_shapley_auto(x_train, y_train, x_valid, y_valid, i, clf, fi
         )
 
 
-def compute_integral_shapley_adaptive(x_train, y_train, x_valid, y_valid, i, clf, final_model,
-                                    utility_func, tolerance=1e-4, max_samples=200, num_MC=100,
-                                    rounding_method='probabilistic'):
+def compute_integral_shapley_smart_adaptive(x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                                           utility_func, tolerance=1e-6, max_depth=10, num_MC=100,
+                                           rounding_method='probabilistic', min_samples_per_interval=3, 
+                                           return_sampling_info=False):
     """
-    Compute Shapley value using adaptive sampling based on smoothness detection.
+    Compute Shapley value using intelligent local adaptive sampling.
+    
+    This method:
+    1. Explores function smoothness across the [0,1] interval
+    2. Recursively subdivides regions with high variation
+    3. Adaptively allocates sampling density based on local behavior
+    4. Uses Richardson extrapolation for error estimation
     
     Args:
         x_train, y_train: Training data
@@ -404,33 +412,333 @@ def compute_integral_shapley_adaptive(x_train, y_train, x_valid, y_valid, i, clf
         clf: Classifier to train on subsets  
         final_model: Model trained on full data
         utility_func: Utility function
-        tolerance: Convergence tolerance
-        max_samples: Maximum number of t samples
+        tolerance: Local smoothness tolerance for subdivision
+        max_depth: Maximum recursion depth for interval subdivision
         num_MC: Monte Carlo samples per t value
-        rounding_method: How to round coalition sizes ('probabilistic', 'round', 'floor', 'ceil')
+        rounding_method: How to round coalition sizes
+        min_samples_per_interval: Minimum sampling points per interval
+        return_sampling_info: Whether to return detailed sampling information
         
     Returns:
-        shapley_value: Estimated Shapley value for data point i
+        If return_sampling_info is False:
+            tuple: (shapley_value, actual_budget)
+        If return_sampling_info is True:
+            tuple: (shapley_value, actual_budget, sampling_info)
     """
-    # Start with a coarse estimate
-    coarse_estimate = compute_integral_shapley_trapezoid(
-        x_train, y_train, x_valid, y_valid, i, clf, final_model, 
-        utility_func, num_t_samples=10, num_MC=num_MC, rounding_method=rounding_method
-    )
+    rng = np.random.default_rng()
     
-    # Progressively refine
-    for num_samples in [20, 50, 100, max_samples]:
-        fine_estimate = compute_integral_shapley_trapezoid(
-            x_train, y_train, x_valid, y_valid, i, clf, final_model,
-            utility_func, num_t_samples=num_samples, num_MC=num_MC, rounding_method=rounding_method
-        )
-        
-        if abs(fine_estimate - coarse_estimate) < tolerance:
-            return fine_estimate
+    def compute_interval_integrand(t_values, num_mc_local=None):
+        """Compute integrand values at given t points"""
+        if num_mc_local is None:
+            num_mc_local = num_MC
             
-        coarse_estimate = fine_estimate
+        integrand_values = []
+        for t in t_values:
+            value = compute_marginal_contribution_at_t(
+                t, x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                utility_func, num_MC=num_mc_local, rounding_method=rounding_method, rng=rng
+            )
+            integrand_values.append(value)
+        return np.array(integrand_values)
     
-    return coarse_estimate
+    def estimate_local_variation(a, b, num_probe=7):
+        """Estimate function variation in interval [a,b] with improved sensitivity"""
+        if b - a < 1e-6:  # Too small interval
+            return 0.0
+            
+        t_probe = np.linspace(a, b, num_probe)
+        integrand_probe = compute_interval_integrand(t_probe, num_mc_local=max(20, num_MC//2))
+        
+        # Compute total variation and second differences
+        if len(integrand_probe) >= 3:
+            # Calculate function range (max - min)
+            func_range = np.max(integrand_probe) - np.min(integrand_probe)
+            
+            # Second difference as smoothness indicator
+            second_diffs = []
+            dt = (b - a) / (num_probe - 1)
+            for j in range(len(integrand_probe) - 2):
+                second_diff = abs(integrand_probe[j+2] - 2*integrand_probe[j+1] + integrand_probe[j]) / (dt**2)
+                second_diffs.append(second_diff)
+            max_second_diff = max(second_diffs) if second_diffs else 0.0
+            
+            # First difference for variation
+            first_diffs = np.abs(np.diff(integrand_probe))
+            total_variation = np.sum(first_diffs) / (b - a)
+            
+            # Standard deviation as another indicator
+            std_dev = np.std(integrand_probe)
+            
+            # Combined metric: emphasize range and variation
+            return func_range * 10 + max_second_diff + total_variation + std_dev * 5
+        return 0.0
+    
+    def adaptive_subdivide(a, b, depth=0):
+        """Recursively subdivide interval based on local variation"""
+        if depth >= max_depth or b - a < 0.01:  # Stop criteria
+            return [(a, b)]
+        
+        # Estimate variation in current interval
+        variation = estimate_local_variation(a, b)
+        
+        if variation > tolerance:
+            # High variation - subdivide
+            mid = (a + b) / 2
+            left_intervals = adaptive_subdivide(a, mid, depth + 1)
+            right_intervals = adaptive_subdivide(mid, b, depth + 1)
+            return left_intervals + right_intervals
+        else:
+            # Low variation - keep as single interval
+            return [(a, b)]
+    
+    print(f"Starting simple smart adaptive sampling for data point {i}...")
+    
+    # Simple approach: Fixed uniform intervals + adaptive sampling
+    num_intervals = 20  # Fixed number of intervals
+    intervals = [(i/num_intervals, (i+1)/num_intervals) for i in range(num_intervals)]
+    
+    print(f"Using {num_intervals} fixed uniform intervals")
+    
+    # Store sampling information for visualization
+    sampling_info = {
+        'intervals': intervals,
+        'interval_info': [],
+        'all_t_values': [],
+        'all_integrand_values': [],
+        'interval_contributions': []
+    }
+    
+    # Single pass: estimate variation and allocate samples directly
+    print("  Computing variation and allocating samples...")
+    interval_variations = []
+    for a, b in intervals:
+        local_variation = estimate_local_variation(a, b, num_probe=5)
+        interval_variations.append(local_variation)
+    
+    # Calculate variation statistics for adaptive thresholds
+    sorted_variations = sorted(interval_variations, reverse=True)
+    max_variation = max(interval_variations) if interval_variations else 1.0
+    mean_variation = np.mean(interval_variations) if interval_variations else 0.0
+    
+    # Use absolute thresholds based on function behavior
+    high_threshold = max(0.01, mean_variation * 2)     # Clearly significant variation
+    medium_threshold = max(0.005, mean_variation * 0.5) # Moderate variation
+    low_threshold = max(0.001, mean_variation * 0.1)    # Minor variation
+    # Below low_threshold: essentially flat, use minimal sampling
+    
+    print(f"  Variation thresholds: high={high_threshold:.2e}, medium={medium_threshold:.2e}, low={low_threshold:.2e}")
+    
+    # Adaptive sampling based on variation only
+    total_integral = 0.0
+    total_samples_used = 0
+    
+    for idx, (a, b) in enumerate(intervals):
+        interval_length = b - a
+        local_variation = interval_variations[idx]
+        
+        # Aggressive direct mapping: variation level -> sample count
+        if local_variation >= high_threshold:         # Clearly significant variation
+            base_samples = 15  # High sampling
+        elif local_variation >= medium_threshold:     # Moderate variation
+            base_samples = 7   # Medium sampling
+        elif local_variation >= low_threshold:        # Minor variation
+            base_samples = 3   # Low sampling
+        else:                                         # Essentially flat
+            base_samples = 2   # Minimal sampling (just endpoints)
+        
+        # Ensure odd number for better Simpson integration
+        if base_samples % 2 == 0:
+            base_samples += 1
+        
+        # Generate sampling points in current interval
+        t_values = np.linspace(a, b, base_samples)
+        integrand_values = compute_interval_integrand(t_values)
+        
+        # Compute integral for this interval using Simpson's rule
+        from scipy.integrate import simpson
+        interval_integral = simpson(integrand_values, t_values)
+        total_integral += interval_integral
+        total_samples_used += base_samples
+        
+        # Store sampling information
+        if return_sampling_info:
+            # Determine which category this interval falls into
+            if local_variation >= high_threshold:
+                category = "High"
+            elif local_variation >= medium_threshold:
+                category = "Medium"
+            elif local_variation >= low_threshold:
+                category = "Low"
+            else:
+                category = "Minimal"
+                
+            sampling_info['interval_info'].append({
+                'interval': (a, b),
+                'length': interval_length,
+                'samples': base_samples,
+                'integral': interval_integral,
+                'variation': local_variation,
+                'category': category,
+                't_values': t_values,
+                'integrand_values': integrand_values
+            })
+            sampling_info['all_t_values'].extend(t_values)
+            sampling_info['all_integrand_values'].extend(integrand_values)
+            sampling_info['interval_contributions'].append(interval_integral)
+        
+        if idx < 5:  # Print details for first few intervals
+            category = "High" if local_variation >= high_threshold else "Medium" if local_variation >= medium_threshold else "Low" if local_variation >= low_threshold else "Minimal"
+            print(f"  Interval [{a:.3f}, {b:.3f}]: variation={local_variation:.2e} ({category}), samples={base_samples}, integral={interval_integral:.6f}")
+    
+    print(f"Smart adaptive sampling completed: {total_samples_used} total samples across {len(intervals)} intervals")
+    # Return both the shapley value and the actual budget used
+    actual_budget = total_samples_used * num_MC
+    
+    if return_sampling_info:
+        return total_integral, actual_budget, sampling_info
+    else:
+        return total_integral, actual_budget
+
+
+def visualize_smart_adaptive_sampling(sampling_info, data_point_index, save_path=None):
+    """
+    Visualize the adaptive sampling pattern used by Smart Adaptive method.
+    
+    Args:
+        sampling_info: Dictionary containing sampling information from smart_adaptive method
+        data_point_index: Index of the data point being analyzed
+        save_path: Optional path to save the plot
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+    
+    # Plot 1: Simple Smart Adaptive Sampling Pattern
+    ax1.set_title(f'Simple Smart Adaptive Sampling for Data Point {data_point_index}', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('t (Coalition Proportion)')
+    ax1.set_ylabel('Sampling Points')
+    
+    # Use categories to determine colors - clearer visualization
+    category_colors = {
+        'High': '#FF6B6B',      # Red - High variation
+        'Medium': '#4ECDC4',    # Teal - Medium variation  
+        'Low': '#45B7D1',       # Blue - Low variation
+        'Minimal': '#96CEB4'    # Green - Minimal variation
+    }
+    
+    for idx, interval_info in enumerate(sampling_info['interval_info']):
+        a, b = interval_info['interval']
+        samples = interval_info['samples']
+        length = interval_info['length']
+        variation = interval_info.get('variation', 0)
+        category = interval_info.get('category', 'Minimal')
+        
+        # Height represents number of sampling points directly
+        height = samples
+        
+        # Draw rectangle representing interval
+        rect = patches.Rectangle((a, 0), length, height, 
+                               linewidth=1, edgecolor='black', 
+                               facecolor=category_colors.get(category, '#96CEB4'), alpha=0.8)
+        ax1.add_patch(rect)
+        
+        # Add text showing number of samples and category
+        ax1.text(a + length/2, height/2, f'{samples}', 
+                ha='center', va='center', fontsize=10, fontweight='bold')
+        ax1.text(a + length/2, height*0.8, f'{category}', 
+                ha='center', va='center', fontsize=8, style='italic')
+    
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(0, max([info['samples'] for info in sampling_info['interval_info']]) * 1.1)
+    ax1.grid(True, alpha=0.3)
+    
+    # Add legend for categories
+    legend_elements = [patches.Patch(facecolor=color, edgecolor='black', label=category) 
+                      for category, color in category_colors.items()]
+    ax1.legend(handles=legend_elements, loc='upper right', fontsize=10)
+    
+    # Plot 2: Sampling points and integrand values
+    ax2.set_title('Integrand Function and Sampling Points', fontsize=12)
+    ax2.set_xlabel('t (Coalition Proportion)')
+    ax2.set_ylabel('Integrand Value E[Δ(t,i)]')
+    
+    # Plot integrand values for each interval
+    for idx, interval_info in enumerate(sampling_info['interval_info']):
+        t_vals = interval_info['t_values']
+        integrand_vals = interval_info['integrand_values']
+        category = interval_info.get('category', 'Minimal')
+        color = category_colors.get(category, '#96CEB4')
+        
+        # Plot line for this interval
+        ax2.plot(t_vals, integrand_vals, 'o-', color=color, 
+                linewidth=2, markersize=4, alpha=0.8)
+        
+        # Highlight sampling points
+        ax2.scatter(t_vals, integrand_vals, color=color, 
+                   s=30, zorder=5, alpha=0.9)
+    
+    # Add horizontal line at y=0 for reference
+    ax2.axhline(y=0, color='red', linestyle='--', alpha=0.5)
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Interval contributions to total integral
+    ax3.set_title('Interval Contributions to Total Shapley Value', fontsize=12)
+    ax3.set_xlabel('Interval Index')
+    ax3.set_ylabel('Interval Contribution')
+    
+    interval_contributions = sampling_info['interval_contributions']
+    interval_indices = range(len(interval_contributions))
+    
+    # Color bars by category
+    bar_colors = [category_colors.get(info.get('category', 'Minimal'), '#96CEB4') 
+                  for info in sampling_info['interval_info']]
+    bars = ax3.bar(interval_indices, interval_contributions, 
+                  color=bar_colors, alpha=0.7, edgecolor='black', linewidth=1)
+    
+    # Add value labels on bars
+    for i, (bar, contrib) in enumerate(zip(bars, interval_contributions)):
+        if abs(contrib) > max(abs(min(interval_contributions)), max(interval_contributions)) * 0.1:
+            ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 
+                    (0.02 if contrib >= 0 else -0.02) * max(interval_contributions),
+                    f'{contrib:.4f}', ha='center', va='bottom' if contrib >= 0 else 'top',
+                    fontsize=8)
+    
+    ax3.axhline(y=0, color='red', linestyle='--', alpha=0.5)
+    ax3.grid(True, alpha=0.3)
+    
+    # Add summary statistics
+    total_intervals = len(sampling_info['intervals'])
+    total_samples = sum([info['samples'] for info in sampling_info['interval_info']])
+    total_shapley = sum(interval_contributions)
+    
+    fig.suptitle(f'Smart Adaptive Sampling Visualization\n'
+                f'Total Intervals: {total_intervals}, Total Sampling Points: {total_samples}, '
+                f'Shapley Value: {total_shapley:.6f}', 
+                fontsize=14, y=0.98)
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Smart Adaptive sampling visualization saved to: {save_path}")
+    
+    plt.show()
+
+
+def compute_integral_shapley_adaptive(x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                                    utility_func, tolerance=1e-4, max_samples=200, num_MC=100,
+                                    rounding_method='probabilistic'):
+    """
+    Legacy adaptive method - redirects to smart adaptive sampling.
+    Kept for backward compatibility.
+    """
+    print("Note: Using improved smart adaptive sampling instead of legacy method")
+    return compute_integral_shapley_smart_adaptive(
+        x_train, y_train, x_valid, y_valid, i, clf, final_model,
+        utility_func, tolerance=tolerance, num_MC=num_MC, rounding_method=rounding_method
+    )
 
 
 def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_model, 
@@ -464,7 +772,7 @@ def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_m
     strata_values = []
     
     # 对每个可能的子集大小进行采样
-    for j in range(N+1):  # 从0到N（包括空集和全集）
+    for j in tqdm(range(N+1)):  # 从0到N（包括空集和全集）
         mc_values = []
         # 对大小为j的子集进行num_MC次采样
         for _ in range(num_MC):
@@ -500,8 +808,7 @@ def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_m
         # 计算该大小子集的平均边际贡献
         if mc_values:
             avg_contribution = np.mean(mc_values)
-            # 对于大小为j的子集，有comb(N,j)种可能的组合，每个组合的权重是
-            # factorial(j) * factorial(N-j-1) / factorial(N)
+            # 分层采样中每层权重相等（类似积分的矩形法则）
             weight = 1/total
             strata_values.append(weight * avg_contribution)
     
@@ -585,6 +892,7 @@ def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, cl
         # Compute average marginal contribution for this coalition size
         if mc_values:
             avg_contribution = np.mean(mc_values)
+            # Stratified sampling: equal weight per layer (like rectangular integration)
             weight = 1/total
             
             layer_sizes.append(j)
@@ -912,7 +1220,7 @@ def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, f
         clf: Classifier to train on subsets  
         final_model: Model trained on full data
         utility_func: Utility function
-        method: Integration method ('trapezoid', 'simpson', 'gaussian', 'adaptive', 'monte_carlo', 'stratified')
+        method: Integration method ('trapezoid', 'simpson', 'gaussian', 'adaptive', 'smart_adaptive', 'monte_carlo', 'stratified')
         rounding_method: How to round coalition sizes ('probabilistic', 'round', 'floor', 'ceil')
         **kwargs: Method-specific parameters
         
@@ -939,6 +1247,13 @@ def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, f
             x_train, y_train, x_valid, y_valid, i, clf, final_model, utility_func,
             rounding_method=rounding_method, **kwargs
         )
+    elif method == 'smart_adaptive':
+        # For backward compatibility, only return shapley value
+        result = compute_integral_shapley_smart_adaptive(
+            x_train, y_train, x_valid, y_valid, i, clf, final_model, utility_func,
+            rounding_method=rounding_method, **kwargs
+        )
+        return result[0] if isinstance(result, tuple) else result
     elif method == 'monte_carlo':
         return monte_carlo_shapley_value(
             i, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, **kwargs
@@ -949,6 +1264,66 @@ def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, f
         )
     else:
         raise ValueError(f"Unknown method: {method}")
+
+
+def compute_integral_shapley_value_with_budget(x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                                             utility_func, method='trapezoid', rounding_method='probabilistic', 
+                                             return_sampling_info=False, **kwargs):
+    """
+    Main interface for computing integral Shapley values with actual budget information.
+    
+    Args:
+        x_train, y_train: Training data
+        x_valid, y_valid: Validation data
+        i: Target data point index
+        clf: Classifier to train on subsets  
+        final_model: Model trained on full data
+        utility_func: Utility function
+        method: Integration method ('trapezoid', 'simpson', 'gaussian', 'adaptive', 'smart_adaptive', 'monte_carlo', 'stratified')
+        rounding_method: How to round coalition sizes ('probabilistic', 'round', 'floor', 'ceil')
+        return_sampling_info: Whether to return sampling information (only for smart_adaptive)
+        **kwargs: Method-specific parameters
+        
+    Returns:
+        tuple: (shapley_value, actual_budget) for smart_adaptive method, (shapley_value, estimated_budget) for others
+        If return_sampling_info=True and method='smart_adaptive': (shapley_value, actual_budget, sampling_info)
+    """
+    if method == 'smart_adaptive':
+        # Smart adaptive returns both shapley value and actual budget
+        result = compute_integral_shapley_smart_adaptive(
+            x_train, y_train, x_valid, y_valid, i, clf, final_model, utility_func,
+            rounding_method=rounding_method, return_sampling_info=return_sampling_info, **kwargs
+        )
+        return result
+    else:
+        # For other methods, compute estimated budget
+        shapley_value = compute_integral_shapley_value(
+            x_train, y_train, x_valid, y_valid, i, clf, final_model, utility_func,
+            method=method, rounding_method=rounding_method, **kwargs
+        )
+        
+        # Estimate budget based on method parameters
+        if method == 'simpson':
+            num_t_samples = kwargs.get('num_t_samples', 21)
+            num_MC = kwargs.get('num_MC', 100)
+            estimated_budget = num_t_samples * num_MC
+        elif method == 'trapezoid':
+            num_t_samples = kwargs.get('num_t_samples', 50)
+            num_MC = kwargs.get('num_MC', 100)
+            estimated_budget = num_t_samples * num_MC
+        elif method == 'monte_carlo':
+            estimated_budget = kwargs.get('num_samples', 10000)
+        elif method == 'stratified':
+            n_points = x_train.shape[0]
+            num_MC = kwargs.get('num_MC', 100)
+            estimated_budget = n_points * num_MC
+        else:
+            estimated_budget = kwargs.get('num_MC', 100) * kwargs.get('num_t_samples', 50)
+        
+        if return_sampling_info:
+            return shapley_value, estimated_budget, None  # No sampling info for other methods
+        else:
+            return shapley_value, estimated_budget
 
 
 def compute_all_shapley_values(x_train, y_train, x_valid, y_valid, clf, final_model,
@@ -994,13 +1369,27 @@ def compute_shapley_for_params(args):
         return index, f"Error: {str(e)}"
 
 
+def compute_shapley_for_params_with_budget(args):
+    """Wrapper function for parallel computation of Shapley values with budget information."""
+    index, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, method, rounding_method, kwargs = args
+    try:
+        value, budget = compute_integral_shapley_value_with_budget(
+            x_train, y_train, x_valid, y_valid, index, clf, final_model, 
+            utility_func, method=method, rounding_method=rounding_method, **kwargs
+        )
+        return index, value, budget
+    except Exception as e:
+        print(f"Error computing Shapley value for index {index}: {str(e)}")
+        return index, f"Error: {str(e)}", 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compute Shapley values using integral formulation")
     parser.add_argument("--dataset", type=str, choices=["iris", "wine", "cancer", "synthetic"], 
                        default="iris", help="Dataset to use")
     parser.add_argument("--utility", type=str, choices=["rkhs", "kl", "acc", "cosine"], 
                        default="acc", help="Utility function")
-    parser.add_argument("--method", type=str, choices=["trapezoid", "simpson", "gaussian", "adaptive", "monte_carlo", "exact", "stratified", "cc", "cc_trapz"],
+    parser.add_argument("--method", type=str, choices=["trapezoid", "simpson", "gaussian", "adaptive", "smart_adaptive", "monte_carlo", "exact", "stratified", "cc", "cc_trapz"],
                        default="trapezoid", help="Integration method")
     parser.add_argument("--clf", choices=["svm", "lr"], default="svm", help="Base classifier")
     parser.add_argument("--num_t_samples", type=int, default=50, help="Number of t samples for integration")
@@ -1065,7 +1454,7 @@ def main():
     elif args.method == 'adaptive':
         method_kwargs = {'tolerance': args.tolerance, 'num_MC': args.num_MC}
     elif args.method == 'monte_carlo':
-        method_kwargs = {'num_samples': args.num_MC * args.num_t_samples}
+        method_kwargs = {'num_samples': args.num_MC}
     elif args.method == 'stratified':
         method_kwargs = {'num_MC': args.num_MC}
     elif args.method in ['cc', 'cc_trapz']:

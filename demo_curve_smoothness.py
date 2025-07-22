@@ -8,12 +8,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
-from sklearn.datasets import load_iris
+from sklearn.datasets import load_iris, load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-
-# 添加src目录到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.core.integral_shapley import stratified_shapley_value_with_plot
 from src.utils.utilities import utility_acc
@@ -28,7 +25,7 @@ def main():
     print("="*60)
     
     # 准备数据
-    data = load_iris()
+    data = load_breast_cancer()
     X, y = data.data, data.target
     x_train, x_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
     
@@ -49,25 +46,25 @@ def main():
     print(f"数据集大小: {len(x_train)} 个训练点")
     print(f"验证集大小: {len(x_valid)} 个验证点")
     
-    # 获取支持向量索引
-    # support_vector_indices = final_model.support_
-    # print(f"支持向量数量: {len(support_vector_indices)}")
-    # print(f"支持向量比例: {len(support_vector_indices)/len(x_train)*100:.1f}%")
     
-    # # 选择一个支持向量和一个非支持向量
-    # support_point = support_vector_indices[18]  # 第一个支持向量
+    support_vector_indices = final_model.support_
+    print(f"支持向量数量: {len(support_vector_indices)}")
+    print(f"支持向量比例: {len(support_vector_indices)/len(x_train)*100:.1f}%")
     
-    # # 找一个非支持向量
-    # non_support_point = None
-    # flag = 0
-    # for i in range(len(x_train)):
-    #     if i not in support_vector_indices:
-    #         non_support_point = i
-    #         flag += 1
-    #         if flag == 18:
-    #             break
-    support_point = 73
-    non_support_point = 26
+    # 选择一个支持向量和一个非支持向量
+    support_point = support_vector_indices[18]  # 第一个支持向量
+    
+    # 找一个非支持向量
+    non_support_point = None
+    flag = 0
+    for i in range(len(x_train)):
+        if i not in support_vector_indices:
+            non_support_point = i
+            flag += 1
+            if flag == 18:
+                break
+    # support_point = 73
+    # non_support_point = 26
     print(f"\n选择的点:")
     print(f"  支持向量: 索引 {support_point}")
     print(f"  非支持向量: 索引 {non_support_point}")

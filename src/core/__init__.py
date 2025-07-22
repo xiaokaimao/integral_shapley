@@ -10,9 +10,10 @@ from .integral_shapley import (
     compute_integral_shapley_trapezoid,
     compute_integral_shapley_gaussian,
     compute_integral_shapley_adaptive,
+    compute_integral_shapley_smart_adaptive,
     monte_carlo_shapley_value,
     exact_shapley_value,
-    estimate_smoothness
+    compute_marginal_contribution_at_t
 )
 
 __all__ = [
@@ -20,7 +21,8 @@ __all__ = [
     'compute_integral_shapley_trapezoid', 
     'compute_integral_shapley_gaussian',
     'compute_integral_shapley_adaptive',
+    'compute_integral_shapley_smart_adaptive',
     'monte_carlo_shapley_value',
     'exact_shapley_value',
-    'estimate_smoothness'
+    'compute_marginal_contribution_at_t'
 ]

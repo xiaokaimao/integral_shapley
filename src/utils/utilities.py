@@ -152,22 +152,25 @@ def utility_KL(x_train, y_train, x_valid, y_valid, clf, final_model, eps=1e-10):
 #####################################
 
 def utility_acc(x_train, y_train, x_valid, y_valid, clf, final_model):
-    """
-    基于准确率的效用函数。
-    在子集上训练分类器，然后在验证集上计算准确率作为效用值。
-    """
-    single_pred_label = (True if len(np.unique(y_train)) == 1 else False)
-    
-    if single_pred_label:
-        y_pred = [y_train[0]] * len(y_valid)
+    """基于相对准确率的效用函数"""
+
+    # 基准准确率（随机猜测）
+    n_classes = len(np.unique(y_valid))
+    baseline_acc = 1.0 / n_classes
+
+    # 计算实际准确率
+    if len(x_train) == 0 or len(np.unique(y_train)) == 1:
+        actual_acc = baseline_acc
     else:
         try:
             clf.fit(x_train, y_train)
             y_pred = clf.predict(x_valid)
-        except Exception as e:
-            return 0
-    
-    return metrics.accuracy_score(y_valid, y_pred, normalize=True)
+            actual_acc = metrics.accuracy_score(y_valid, y_pred, normalize=True)
+        except:
+            actual_acc = baseline_acc
+
+    # 返回相对于基准的改进
+    return actual_acc - baseline_acc
 
 #####################################
 # 4. 基于余弦相似度的效用函数
