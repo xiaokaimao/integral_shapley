@@ -117,8 +117,6 @@ def compute_integral_shapley_trapezoid(x_train, y_train, x_valid, y_valid, i, cl
     Returns:
         shapley_value: Estimated Shapley value for data point i
     """
-    total = x_train.shape[0]
-    N = total  # Total number of data points
     rng = np.random.default_rng()  # Random number generator for probabilistic rounding
 
     # Sample t values uniformly in [0,1]
@@ -126,38 +124,11 @@ def compute_integral_shapley_trapezoid(x_train, y_train, x_valid, y_valid, i, cl
     
     integrand = []
     for t in t_values:
-        # Use the new coalition size computation with chosen rounding method
-        m = compute_coalition_size(t, N, method=rounding_method, rng=rng)
-        mc_values = []
-        
-        for _ in range(num_MC):
-            if m == 0:
-                # Empty coalition
-                X_sub = np.empty((0, x_train.shape[1]))
-                y_sub = np.empty(0)
-            else:
-                # Sample m points from all candidates except target point i
-                candidate_indices = [j for j in range(total) if j != i]
-                sample_indices = random.sample(candidate_indices, m)
-                X_sub = x_train[sample_indices]
-                y_sub = y_train[sample_indices]
-            
-            try:
-                util_S = utility_func(X_sub, y_sub, x_valid, y_valid, clone(clf), final_model)
-            except:
-                util_S = 0.0
-                
-            X_sub_i = np.vstack([X_sub, x_train[i]]) if m > 0 else x_train[i].reshape(1, -1)
-            y_sub_i = np.append(y_sub, y_train[i])
-            
-            try:
-                util_S_i = utility_func(X_sub_i, y_sub_i, x_valid, y_valid, clone(clf), final_model)
-            except:
-                util_S_i = 0.0
-                
-            mc_values.append(util_S_i - util_S)
-        
-        integrand.append(np.mean(mc_values))
+        marginal_contrib = compute_marginal_contribution_at_t(
+            t, x_train, y_train, x_valid, y_valid, i, clf, final_model,
+            utility_func, num_MC, rounding_method, rng
+        )
+        integrand.append(marginal_contrib)
     
     # Trapezoidal integration
     shapley_value = np.trapezoid(integrand, t_values)
@@ -184,8 +155,6 @@ def compute_integral_shapley_gaussian(x_train, y_train, x_valid, y_valid, i, clf
     Returns:
         shapley_value: Estimated Shapley value for data point i
     """
-    total = x_train.shape[0]
-    N = total
     rng = np.random.default_rng()
 
     def integrand(t):
@@ -194,35 +163,11 @@ def compute_integral_shapley_gaussian(x_train, y_train, x_valid, y_valid, i, clf
         out = []
         
         for ti in t_arr:
-            m = compute_coalition_size(ti, N, method=rounding_method, rng=rng)
-            mc_values = []
-            
-            for _ in range(num_MC):
-                if m == 0:
-                    X_sub = np.empty((0, x_train.shape[1]))
-                    y_sub = np.empty(0)
-                else:
-                    candidate_indices = [j for j in range(total) if j != i]
-                    sample_indices = random.sample(candidate_indices, m)
-                    X_sub = x_train[sample_indices]
-                    y_sub = y_train[sample_indices]
-                
-                try:
-                    util_S = utility_func(X_sub, y_sub, x_valid, y_valid, clone(clf), final_model)
-                except:
-                    util_S = 0.0
-                    
-                X_sub_i = np.vstack([X_sub, x_train[i]]) if m > 0 else x_train[i].reshape(1, -1)
-                y_sub_i = np.append(y_sub, y_train[i])
-                
-                try:
-                    util_S_i = utility_func(X_sub_i, y_sub_i, x_valid, y_valid, clone(clf), final_model)
-                except:
-                    util_S_i = 0.0
-                    
-                mc_values.append(util_S_i - util_S)
-            
-            out.append(np.mean(mc_values))
+            marginal_contrib = compute_marginal_contribution_at_t(
+                ti, x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                utility_func, num_MC, rounding_method, rng
+            )
+            out.append(marginal_contrib)
         
         return np.array(out)[0] if np.isscalar(t) else np.array(out)
 
@@ -258,50 +203,20 @@ def compute_integral_shapley_simpson(x_train, y_train, x_valid, y_valid, i, clf,
         num_t_samples += 1
         print(f"Adjusted to {num_t_samples} samples (Simpson's rule requires odd number)")
     
-    total = x_train.shape[0]
-    N = total - 1  # Exclude target point
     rng = np.random.default_rng()
     
-    # Generate t values (excluding endpoints to avoid edge cases)
-    t_values = np.linspace(0.001, 0.999, num_t_samples)
+    # Generate t values using complete interval [0,1] for theoretical accuracy
+    t_values = np.linspace(0, 1, num_t_samples, endpoint=True)
     integrand_values = []
     
     print(f"Computing Simpson integral with {num_t_samples} t-samples...")
     
     for t in tqdm(t_values, desc="Simpson integration"):
-        mc_values = []
-        
-        for _ in range(num_MC):
-            # Compute coalition size using rounding method
-            m = compute_coalition_size(t, N, method=rounding_method, rng=rng)
-            
-            # Sample coalition S of size m (excluding point i)
-            if m == 0:
-                X_sub = np.empty((0, x_train.shape[1]))
-                y_sub = np.empty(0)
-            else:
-                candidate_indices = [j for j in range(total) if j != i]
-                sample_indices = random.sample(candidate_indices, m)
-                X_sub = x_train[sample_indices]
-                y_sub = y_train[sample_indices]
-            
-            try:
-                util_S = utility_func(X_sub, y_sub, x_valid, y_valid, clone(clf), final_model)
-            except:
-                util_S = 0.0
-                
-            # Coalition S ∪ {i}
-            X_sub_i = np.vstack([X_sub, x_train[i]]) if m > 0 else x_train[i].reshape(1, -1)
-            y_sub_i = np.append(y_sub, y_train[i])
-            
-            try:
-                util_S_i = utility_func(X_sub_i, y_sub_i, x_valid, y_valid, clone(clf), final_model)
-            except:
-                util_S_i = 0.0
-                
-            mc_values.append(util_S_i - util_S)
-        
-        integrand_values.append(np.mean(mc_values))
+        marginal_contrib = compute_marginal_contribution_at_t(
+            t, x_train, y_train, x_valid, y_valid, i, clf, final_model,
+            utility_func, num_MC, rounding_method, rng
+        )
+        integrand_values.append(marginal_contrib)
     
     # Apply Simpson's rule
     from scipy.integrate import simpson
@@ -727,22 +642,10 @@ def visualize_smart_adaptive_sampling(sampling_info, data_point_index, save_path
     plt.show()
 
 
-def compute_integral_shapley_adaptive(x_train, y_train, x_valid, y_valid, i, clf, final_model,
-                                    utility_func, tolerance=1e-4, max_samples=200, num_MC=100,
-                                    rounding_method='probabilistic'):
-    """
-    Legacy adaptive method - redirects to smart adaptive sampling.
-    Kept for backward compatibility.
-    """
-    print("Note: Using improved smart adaptive sampling instead of legacy method")
-    return compute_integral_shapley_smart_adaptive(
-        x_train, y_train, x_valid, y_valid, i, clf, final_model,
-        utility_func, tolerance=tolerance, num_MC=num_MC, rounding_method=rounding_method
-    )
 
 
 def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_model, 
-                            utility_func, num_MC):
+                            utility_func, num_MC, plot=False, save_path=None, return_details=False):
     """
     使用分层采样方法估计数据点 i 的 Shapley 值。
     
@@ -757,10 +660,17 @@ def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_m
       final_model: 全量数据训练得到的模型
       utility_func: 效用函数
       num_MC: 每个子集大小的蒙特卡洛采样次数
+      plot: 是否生成可视化图表
+      save_path: 图表保存路径（可选）
+      return_details: 是否返回详细信息 (layer_sizes, layer_contributions)
     
     返回:
-      目标数据点的估计 Shapley 值（浮点数）
+      如果 return_details=False: shapley_value（浮点数）
+      如果 return_details=True: (shapley_value, layer_sizes, layer_contributions)
     """
+    import matplotlib.pyplot as plt
+    from tqdm import tqdm
+    
     total = X_train.shape[0]
     # 从训练集中移除目标数据点 i，构建候选池
     indices = [j for j in range(total) if j != i]
@@ -769,10 +679,12 @@ def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_m
     N = len(candidate_x)  # 候选数据数
     
     # 存储每一层(每个大小)的平均边际贡献
+    layer_sizes = []
+    layer_contributions = []
     strata_values = []
     
     # 对每个可能的子集大小进行采样
-    for j in tqdm(range(N+1)):  # 从0到N（包括空集和全集）
+    for j in tqdm(range(N+1), desc=f"Computing stratified Shapley for point {i}"):
         mc_values = []
         # 对大小为j的子集进行num_MC次采样
         for _ in range(num_MC):
@@ -810,99 +722,15 @@ def stratified_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_m
             avg_contribution = np.mean(mc_values)
             # 分层采样中每层权重相等（类似积分的矩形法则）
             weight = 1/total
-            strata_values.append(weight * avg_contribution)
-    
-    # 总的Shapley值是所有层的加权和
-    shapley_value = sum(strata_values)
-    
-    return shapley_value
-
-
-def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, clf, final_model, 
-                                      utility_func, num_MC, plot=True, save_path=None):
-    """
-    Compute Shapley value using stratified sampling and visualize marginal contributions by coalition size.
-    
-    Args:
-      i: Target data point index in X_train
-      X_train, y_train: Training dataset
-      x_valid, y_valid: Validation dataset (for utility computation)
-      clf: Classifier to train on subsets
-      final_model: Model trained on full data
-      utility_func: Utility function
-      num_MC: Monte Carlo samples per coalition size
-      plot: Whether to generate plot
-      save_path: Plot save path (optional)
-    
-    Returns:
-      tuple: (shapley_value, layer_sizes, layer_contributions)
-        - shapley_value: Estimated Shapley value
-        - layer_sizes: Coalition sizes (0 to N)
-        - layer_contributions: Expected marginal contributions per layer
-    """
-    import matplotlib.pyplot as plt
-    from tqdm import tqdm
-    
-    total = X_train.shape[0]
-    # Remove target data point i from training set to build candidate pool
-    indices = [j for j in range(total) if j != i]
-    candidate_x = X_train[indices]
-    candidate_y = y_train[indices]
-    N = len(candidate_x)  # Number of candidate data points
-    
-    # Store layer information
-    layer_sizes = []
-    layer_contributions = []
-    strata_values = []
-    
-    # Sample over each possible coalition size with progress bar
-    for j in tqdm(range(N+1), desc=f"Computing stratified Shapley for point {i}"):
-        mc_values = []
-        # Monte Carlo sampling for coalition size j
-        for _ in range(num_MC):
-            # Use empty set if j=0
-            if j == 0:
-                sample_indices = []
-            else:
-                sample_indices = random.sample(range(N), j)
-            
-            X_sub = candidate_x[sample_indices] if j > 0 else np.empty((0, X_train.shape[1]))
-            y_sub = candidate_y[sample_indices] if j > 0 else np.empty(0)
-            
-            try:
-                # Compute utility v(S)
-                util_S = utility_func(X_sub, y_sub, x_valid, y_valid, clone(clf), final_model)
-            except Exception:
-                # Return 0 if empty subset or computation error
-                util_S = 0.0
-                
-            # Build S ∪ {i}
-            X_sub_i = np.concatenate([X_sub, X_train[i].reshape(1, -1)], axis=0)
-            y_sub_i = np.concatenate([y_sub, np.array([y_train[i]])], axis=0)
-            
-            try:
-                # Compute utility v(S ∪ {i})
-                util_S_i = utility_func(X_sub_i, y_sub_i, x_valid, y_valid, clone(clf), final_model)
-            except Exception:
-                util_S_i = 0.0
-                
-            # Compute marginal contribution
-            mc_values.append(util_S_i - util_S)
-        
-        # Compute average marginal contribution for this coalition size
-        if mc_values:
-            avg_contribution = np.mean(mc_values)
-            # Stratified sampling: equal weight per layer (like rectangular integration)
-            weight = 1/total
             
             layer_sizes.append(j)
             layer_contributions.append(avg_contribution)
             strata_values.append(weight * avg_contribution)
     
-    # Total Shapley value is weighted sum of all layers
+    # 总的Shapley值是所有层的加权和
     shapley_value = sum(strata_values)
     
-    # Generate plot
+    # 生成可视化图表
     if plot:
         # Create subplot with two x-axes: coalition size and normalized [0,1]
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
@@ -922,8 +750,8 @@ def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, cl
                         xytext=(0,10), ha='center', fontsize=8)
         
         # Plot 2: Normalized [0,1] scale showing area under curve = Shapley value
-        N = len(layer_sizes) - 1  # Max coalition size
-        normalized_x = [s/N for s in layer_sizes]  # Scale to [0,1]
+        N_plot = len(layer_sizes) - 1  # Max coalition size
+        normalized_x = [s/N_plot for s in layer_sizes] if N_plot > 0 else layer_sizes
         
         ax2.plot(normalized_x, layer_contributions, 'go-', linewidth=2, markersize=6)
         ax2.fill_between(normalized_x, layer_contributions, alpha=0.3, color='green', 
@@ -936,8 +764,9 @@ def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, cl
         ax2.legend()
         
         # Add mathematical annotation
-        ax2.text(0.02, max(layer_contributions)*0.8, 
-                f'Shapley Value = ∫₀¹ E[Δ(t,i)] dt\n= Area under curve\n= {shapley_value:.6f}',
+        max_contrib = max(layer_contributions) if layer_contributions else 1
+        ax2.text(0.02, max_contrib*0.8, 
+                f'Shapley Value = ∫₀¹ E[Δ(t,i)] dt\\n= Area under curve\\n= {shapley_value:.6f}',
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
                 fontsize=10)
         
@@ -949,7 +778,38 @@ def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, cl
         
         plt.show()
     
-    return shapley_value, layer_sizes, layer_contributions
+    # 返回结果
+    if return_details:
+        return shapley_value, layer_sizes, layer_contributions
+    else:
+        return shapley_value
+
+
+def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, clf, final_model, 
+                                      utility_func, num_MC, plot=True, save_path=None):
+    """
+    兼容性包装器：调用统一的 stratified_shapley_value 函数。
+    
+    此函数已被合并到 stratified_shapley_value 中。保留此包装器以保持向后兼容性。
+    
+    Args:
+      i: Target data point index in X_train
+      X_train, y_train: Training dataset
+      x_valid, y_valid: Validation dataset (for utility computation)
+      clf: Classifier to train on subsets
+      final_model: Model trained on full data
+      utility_func: Utility function
+      num_MC: Monte Carlo samples per coalition size
+      plot: Whether to generate plot
+      save_path: Plot save path (optional)
+    
+    Returns:
+      tuple: (shapley_value, layer_sizes, layer_contributions)
+    """
+    return stratified_shapley_value(
+        i, X_train, y_train, x_valid, y_valid, clf, final_model,
+        utility_func, num_MC, plot=plot, save_path=save_path, return_details=True
+    )
 
 
 def cc_shapley_nested_trapz(
@@ -978,9 +838,8 @@ def cc_shapley_nested_trapz(
     M  = num_t_samples
     indices = np.arange(n)
 
-    # -------- 1. t-grid：均匀区间中点 --------
-    # t_grid = (np.arange(M) + 0.5) / M            # shape = (M,)
-    t_grid = np.linspace(0, 1, num_t_samples, endpoint=True)[1:]  # shape = (M,)
+    # -------- 1. t-grid：均匀区间完整范围 --------
+    t_grid = np.linspace(0, 1, num_t_samples, endpoint=True)  # shape = (M,)
 
     cc_sum = np.zeros((n, M + 1))
     cc_cnt = np.zeros((n, M + 1 ), dtype=int)
@@ -1107,12 +966,313 @@ def cc_shapley(
 
     # 跳过 j=0 列，用 nanmean 自动忽略 cc_cnt==0 的位置
     sv = np.nanmean(cc_mean[:, 1:], axis=1)
-
-
-
-    # Shapley_i  = 1/n ∑_{j=1}^n  \overline{SV}_{i,j}
-    # sv = np.nanmean(cc_mean, axis=1)    # 跳过 j=0 列
     return sv 
+
+
+def _cc_layer_worker(args):
+    """
+    Worker function for parallel CC layer processing.
+    Each process handles one coalition size (layer) with all its MC samples.
+    
+    Args:
+        args: Tuple containing (j, num_MC, seed, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func)
+    
+    Returns:
+        Tuple: (j, list_of_contributions)
+        where list_of_contributions contains (S_idx, comp_idx, cc_value) tuples
+    """
+    j, num_MC, seed, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func = args
+    
+    # Create independent random state for this layer
+    rng = np.random.default_rng(seed)
+    n = x_train.shape[0]
+    indices = np.arange(n)
+    
+    layer_contributions = []
+    
+    # Process all MC samples for this coalition size j
+    for _ in range(num_MC):
+        try:
+            # Sample coalition S of size j
+            S_idx = rng.choice(indices, size=j, replace=False)
+            comp_idx = np.setdiff1d(indices, S_idx, assume_unique=True)
+            
+            # Calculate CC_N(S) = U(S) - U(N\S)
+            clf_s = clone(clf)
+            clf_c = clone(clf)
+            
+            try:
+                u_s = utility_func(x_train[S_idx], y_train[S_idx], 
+                                  x_valid, y_valid, clf_s, final_model)
+            except:
+                u_s = 0.0
+                
+            try:
+                u_c = utility_func(x_train[comp_idx], y_train[comp_idx], 
+                                  x_valid, y_valid, clf_c, final_model)
+            except:
+                u_c = 0.0
+                
+            cc_value = u_s - u_c
+            layer_contributions.append((S_idx, comp_idx, cc_value))
+            
+        except Exception:
+            # Add zero contribution if sampling fails
+            layer_contributions.append((np.array([]), np.array([]), 0.0))
+    
+    return j, layer_contributions
+
+
+def cc_shapley_parallel(x_train: np.ndarray, y_train: np.ndarray, 
+                       x_valid: np.ndarray, y_valid: np.ndarray,
+                       clf, final_model, utility_func,
+                       num_MC: int = 100,
+                       num_processes: Optional[int] = None,
+                       rng: Optional[np.random.Generator] = None) -> np.ndarray:
+    """
+    Parallel CC Shapley using sampling-level parallelization.
+    
+    This method:
+    1. For each layer j (coalition size), performs num_MC sampling in parallel
+    2. Uses complementary contribution: CC_N(S) = U(S) - U(N\\S)
+    3. Implements the dual assignment: S players get +cc_value, complement gets -cc_value
+    4. Averages across all layers to get final Shapley values
+    
+    Args:
+        x_train, y_train: Training data
+        x_valid, y_valid: Validation data
+        clf: Classifier to train on subsets
+        final_model: Model trained on full data
+        utility_func: Utility function
+        num_MC: Monte Carlo samples per coalition size
+        num_processes: Number of parallel processes (default: all CPU cores)
+        rng: Random number generator (for reproducibility)
+        
+    Returns:
+        shapley_values: Array of Shapley values for all data points
+    """
+    if num_processes is None:
+        num_processes = mp.cpu_count()
+        
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    n = x_train.shape[0]
+    
+    print(f"CC Layer-wise: {n} layers, {num_MC} MC/layer, {num_processes} processes")
+    print(f"Total tasks: {n} layers (one per process)")
+    
+    # Generate layer tasks - one task per coalition size
+    layer_tasks = []
+    for j in range(1, n + 1):  # Coalition sizes from 1 to n
+        # Create unique seed for each layer
+        layer_seed = rng.integers(0, 2**31) ^ hash(j) & 0x7FFFFFFF
+        task_args = (j, num_MC, layer_seed, x_train, y_train, x_valid, y_valid, 
+                    clf, final_model, utility_func)
+        layer_tasks.append(task_args)
+    
+    # Execute layer tasks in parallel
+    print(f"Starting parallel CC layer processing...")
+    with mp.Pool(processes=num_processes) as pool:
+        layer_results = list(tqdm(
+            pool.imap_unordered(_cc_layer_worker, layer_tasks),
+            total=len(layer_tasks), 
+            desc="CC layer processing"
+        ))
+    
+    # Organize results by coalition size (layer j)
+    print("Processing results and computing averages...")
+    layer_contributions = {}
+    for j, contributions in layer_results:
+        layer_contributions[j] = contributions
+    
+    # Build the CC sum and count matrices
+    cc_sum = np.zeros((n, n + 1))   # [player, layer]
+    cc_cnt = np.zeros((n, n + 1), dtype=int)
+    
+    for j in range(1, n + 1):
+        if j not in layer_contributions:
+            continue
+            
+        for S_idx, comp_idx, cc_value in layer_contributions[j]:
+            # Players in S: layer j gets +cc_value
+            if len(S_idx) > 0:
+                cc_sum[S_idx, j] += cc_value
+                cc_cnt[S_idx, j] += 1
+            
+            # Players in complement: layer (n-j) gets -cc_value
+            jj = n - j
+            if jj > 0 and len(comp_idx) > 0:
+                cc_sum[comp_idx, jj] += -cc_value
+                cc_cnt[comp_idx, jj] += 1
+    
+    # Calculate means and final Shapley values
+    cc_mean = np.full_like(cc_sum, np.nan, dtype=float)
+    mask = cc_cnt > 0
+    cc_mean[mask] = cc_sum[mask] / cc_cnt[mask]
+    
+    # Skip j=0 column, use nanmean to ignore positions with cc_cnt==0
+    sv = np.nanmean(cc_mean[:, 1:], axis=1)
+    
+    print(f"CC Parallel completed. Shapley values computed for {n} data points.")
+    return sv
+
+
+def _cc_integral_single_sample(args):
+    """
+    Worker function for parallel CC integral sampling.
+    
+    Args:
+        args: Tuple containing (t, seed, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func)
+    
+    Returns:
+        Tuple: (t, S_idx, comp_idx, cc_value)
+    """
+    t, seed, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func = args
+    
+    # Create independent random state for this sample
+    rng = np.random.default_rng(seed)
+    n = x_train.shape[0]
+    indices = np.arange(n)
+    
+    # Convert t to coalition size using same logic as other integral methods
+    j = max(1, min(n-1, int(np.round(t * (n-1)))))
+    
+    try:
+        # Sample coalition S of size j
+        S_idx = rng.choice(indices, size=j, replace=False)
+        comp_idx = np.setdiff1d(indices, S_idx, assume_unique=True)
+        
+        # Calculate CC_N(S) = U(S) - U(N\S)
+        clf_s = clone(clf)
+        clf_c = clone(clf)
+        
+        try:
+            u_s = utility_func(x_train[S_idx], y_train[S_idx], 
+                              x_valid, y_valid, clf_s, final_model)
+        except:
+            u_s = 0.0
+            
+        try:
+            u_c = utility_func(x_train[comp_idx], y_train[comp_idx], 
+                              x_valid, y_valid, clf_c, final_model)
+        except:
+            u_c = 0.0
+            
+        cc_value = u_s - u_c
+        
+        return t, S_idx, comp_idx, cc_value
+        
+    except Exception as e:
+        # Return zero contribution if sampling fails
+        return t, np.array([]), np.array([]), 0.0
+
+
+def cc_shapley_integral_parallel(x_train: np.ndarray, y_train: np.ndarray, 
+                               x_valid: np.ndarray, y_valid: np.ndarray,
+                               clf, final_model, utility_func,
+                               num_t_samples: int = 100, num_MC: int = 100,
+                               num_processes: Optional[int] = None,
+                               rng: Optional[np.random.Generator] = None) -> np.ndarray:
+    """
+    Parallel CC Shapley using integral formulation with sampling-level parallelization.
+    
+    This method:
+    1. Creates a t-grid for numerical integration over [0,1]
+    2. For each t, performs num_MC sampling in parallel across all CPU cores
+    3. Uses complementary contribution: CC_N(S) = U(S) - U(N\\S)
+    4. Integrates the results numerically to get final Shapley values
+    
+    Args:
+        x_train, y_train: Training data
+        x_valid, y_valid: Validation data
+        clf: Classifier to train on subsets
+        final_model: Model trained on full data
+        utility_func: Utility function
+        num_t_samples: Number of integration points
+        num_MC: Monte Carlo samples per integration point
+        num_processes: Number of parallel processes (default: all CPU cores)
+        rng: Random number generator (for reproducibility)
+        
+    Returns:
+        shapley_values: Array of Shapley values for all data points
+    """
+    if num_processes is None:
+        num_processes = mp.cpu_count()
+        
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    n = x_train.shape[0]
+    
+    # Create integration grid
+    t_grid = np.linspace(0.001, 0.999, num_t_samples)  # Avoid exact 0 and 1
+    
+    print(f"CC Integral Parallel: {num_t_samples} t-points, {num_MC} MC/point, {num_processes} processes")
+    print(f"Total tasks: {num_t_samples * num_MC} = {num_t_samples} × {num_MC}")
+    
+    # Generate all sampling tasks
+    all_tasks = []
+    for t in t_grid:
+        for mc_i in range(num_MC):
+            # Create unique seed for each task
+            task_seed = rng.integers(0, 2**31) ^ hash((t, mc_i)) & 0x7FFFFFFF
+            task_args = (t, task_seed, x_train, y_train, x_valid, y_valid, 
+                        clf, final_model, utility_func)
+            all_tasks.append(task_args)
+    
+    # Execute all sampling tasks in parallel
+    print(f"Starting parallel CC sampling...")
+    with mp.Pool(processes=num_processes) as pool:
+        results = list(tqdm(
+            pool.imap_unordered(_cc_integral_single_sample, all_tasks),
+            total=len(all_tasks), 
+            desc="CC integral sampling"
+        ))
+    
+    # Organize results by t-value for integration
+    print("Processing results and computing integration...")
+    t_contributions = {}
+    for t, S_idx, comp_idx, cc_value in results:
+        if t not in t_contributions:
+            t_contributions[t] = []
+        t_contributions[t].append((S_idx, comp_idx, cc_value))
+    
+    # For each t-point, compute average marginal contributions for all players
+    integrand_matrix = np.zeros((n, len(t_grid)))  # [player, t_point]
+    
+    for t_idx, t in enumerate(t_grid):
+        if t not in t_contributions:
+            continue
+            
+        # Accumulate contributions for this t-point
+        player_contributions = np.zeros(n)
+        player_counts = np.zeros(n, dtype=int)
+        
+        for S_idx, comp_idx, cc_value in t_contributions[t]:
+            # Players in S get +cc_value
+            if len(S_idx) > 0:
+                player_contributions[S_idx] += cc_value
+                player_counts[S_idx] += 1
+            
+            # Players in complement get -cc_value  
+            if len(comp_idx) > 0:
+                player_contributions[comp_idx] += -cc_value
+                player_counts[comp_idx] += 1
+        
+        # Average the contributions for this t-point
+        mask = player_counts > 0
+        player_avg = np.zeros(n)
+        player_avg[mask] = player_contributions[mask] / player_counts[mask]
+        
+        integrand_matrix[:, t_idx] = player_avg
+    
+    # Numerical integration using trapezoidal rule
+    print("Performing numerical integration...")
+    shapley_values = np.trapezoid(integrand_matrix, t_grid, axis=1)
+    
+    print(f"CC Integral Parallel completed. Shapley values computed for {n} data points.")
+    return shapley_values
 
 
 def monte_carlo_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_model, 
@@ -1243,10 +1403,13 @@ def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, f
             rounding_method=rounding_method, **kwargs
         )
     elif method == 'adaptive':
-        return compute_integral_shapley_adaptive(
+        # Redirect 'adaptive' to 'smart_adaptive' for consistency
+        print("Note: 'adaptive' method redirects to 'smart_adaptive'")
+        result = compute_integral_shapley_smart_adaptive(
             x_train, y_train, x_valid, y_valid, i, clf, final_model, utility_func,
             rounding_method=rounding_method, **kwargs
         )
+        return result[0] if isinstance(result, tuple) else result
     elif method == 'smart_adaptive':
         # For backward compatibility, only return shapley value
         result = compute_integral_shapley_smart_adaptive(
@@ -1337,7 +1500,7 @@ def compute_all_shapley_values(x_train, y_train, x_valid, y_valid, clf, final_mo
         clf: Classifier to train on subsets  
         final_model: Model trained on full data
         utility_func: Utility function
-        method: Method ('cc', 'cc_trapz')
+        method: Method ('cc', 'cc_parallel', 'cc_trapz', 'cc_integral_parallel')
         **kwargs: Method-specific parameters
         
     Returns:
@@ -1347,8 +1510,16 @@ def compute_all_shapley_values(x_train, y_train, x_valid, y_valid, clf, final_mo
         return cc_shapley(
             x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, **kwargs
         )
+    elif method == 'cc_parallel':
+        return cc_shapley_parallel(
+            x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, **kwargs
+        )
     elif method == 'cc_trapz':
         return cc_shapley_nested_trapz(
+            x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, **kwargs
+        )
+    elif method == 'cc_integral_parallel':
+        return cc_shapley_integral_parallel(
             x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, **kwargs
         )
     else:
@@ -1389,8 +1560,8 @@ def main():
                        default="iris", help="Dataset to use")
     parser.add_argument("--utility", type=str, choices=["rkhs", "kl", "acc", "cosine"], 
                        default="acc", help="Utility function")
-    parser.add_argument("--method", type=str, choices=["trapezoid", "simpson", "gaussian", "adaptive", "smart_adaptive", "monte_carlo", "exact", "stratified", "cc", "cc_trapz"],
-                       default="trapezoid", help="Integration method")
+    parser.add_argument("--method", type=str, choices=["trapezoid", "simpson", "gaussian", "adaptive", "smart_adaptive", "monte_carlo", "exact", "stratified", "cc", "cc_parallel", "cc_trapz", "cc_integral_parallel"],
+                       default="trapezoid", help="Integration method (note: 'adaptive' redirects to 'smart_adaptive')")
     parser.add_argument("--clf", choices=["svm", "lr"], default="svm", help="Base classifier")
     parser.add_argument("--num_t_samples", type=int, default=50, help="Number of t samples for integration")
     parser.add_argument("--num_MC", type=int, default=100, help="Monte Carlo samples per t value")
@@ -1451,16 +1622,21 @@ def main():
         method_kwargs = {'num_t_samples': args.num_t_samples, 'num_MC': args.num_MC}
     elif args.method == 'gaussian':
         method_kwargs = {'num_nodes': args.num_nodes, 'num_MC': args.num_MC}
-    elif args.method == 'adaptive':
+    elif args.method == 'adaptive' or args.method == 'smart_adaptive':
         method_kwargs = {'tolerance': args.tolerance, 'num_MC': args.num_MC}
     elif args.method == 'monte_carlo':
         method_kwargs = {'num_samples': args.num_MC}
     elif args.method == 'stratified':
         method_kwargs = {'num_MC': args.num_MC}
-    elif args.method in ['cc', 'cc_trapz']:
+    elif args.method in ['cc', 'cc_parallel', 'cc_trapz', 'cc_integral_parallel']:
         method_kwargs = {'num_MC': args.num_MC}
-        if args.method == 'cc_trapz':
+        if args.method == 'cc_parallel':
+            method_kwargs['num_processes'] = args.processes
+        elif args.method == 'cc_trapz':
             method_kwargs['num_t_samples'] = args.num_t_samples
+        elif args.method == 'cc_integral_parallel':
+            method_kwargs['num_t_samples'] = args.num_t_samples
+            method_kwargs['num_processes'] = args.processes
 
     # Compute Shapley values
     if args.single_point is not None:
@@ -1476,7 +1652,7 @@ def main():
             value = exact_shapley_value(idx, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func)
             results[idx] = value
         results = {"Exact": np.array([results[i] for i in sorted(target_indices)])}
-    elif args.method in ['cc', 'cc_trapz']:
+    elif args.method in ['cc', 'cc_parallel', 'cc_trapz', 'cc_integral_parallel']:
         # CC methods compute all points simultaneously
         print(f"Computing {args.method} Shapley values for all {len(x_train)} data points...")
         all_values = compute_all_shapley_values(
@@ -1522,10 +1698,10 @@ def main():
 
     # Save results
     # Different filename formats for different methods
-    if args.method in ['trapezoid', 'gaussian', 'adaptive']:
-        # Methods that use t_samples
+    if args.method in ['trapezoid', 'gaussian', 'adaptive', 'smart_adaptive']:
+        # Methods that use t_samples or tolerance
         pkl_filename = f"results/pickles/{args.clf}_shapley_{args.dataset}_{args.utility}_{args.method}_t{args.num_t_samples}_mc{args.num_MC}.pkl"
-    elif args.method in ['stratified', 'monte_carlo']:
+    elif args.method in ['stratified', 'monte_carlo', 'cc', 'cc_parallel']:
         # Methods that only use MC samples
         pkl_filename = f"results/pickles/{args.clf}_shapley_{args.dataset}_{args.utility}_{args.method}_mc{args.num_MC}.pkl"
     else:

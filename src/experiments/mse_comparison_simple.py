@@ -27,7 +27,8 @@ from src.core.integral_shapley import (
     compute_shapley_for_params,
     compute_shapley_for_params_with_budget,
     compute_integral_shapley_value_with_budget,
-    visualize_smart_adaptive_sampling
+    visualize_smart_adaptive_sampling,
+    cc_shapley_parallel
 )
 from src.utils.utilities import utility_acc
 from src.utils.model_utils import return_model
@@ -57,6 +58,19 @@ def compute_stratified_single(args):
     except Exception as e:
         print(f"Error computing Stratified for point {i}: {e}")
         return i, np.nan
+
+
+def compute_cc_values(x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, num_mc):
+    """Compute CC Shapley values for all points using parallel method."""
+    try:
+        cc_values = cc_shapley_parallel(
+            x_train, y_train, x_valid, y_valid, clf, final_model, 
+            utility_func, num_MC=num_mc
+        )
+        return cc_values
+    except Exception as e:
+        print(f"Error computing CC values: {e}")
+        return np.full(len(x_train), np.nan)
 
 
 def compute_mare(predicted, ground_truth, epsilon=1e-8):
@@ -141,7 +155,7 @@ def main(visualize_sampling=False, target_point_for_viz=0):
     x_train = scaler.fit_transform(x_train)
     x_valid = scaler.transform(x_valid)
     
-    # Train models - fixed model names
+    # Train models
     final_model = return_model('LinearSVC')
     final_model.fit(x_train, y_train)
     clf = return_model('LinearSVC')
@@ -214,6 +228,20 @@ def main(visualize_sampling=False, target_point_for_viz=0):
         results.append({'k': stratified_actual_budget, 'method': 'stratified', 'mare': stratified_mare})
         print(f"      MARE: {stratified_mare:.4f} ({stratified_mare*100:.2f}%)")
         print(f"      Actual budget: {stratified_actual_budget} (target: {k})")
+        
+        # CC (Complementary Contribution): mc = k/N (parallel)
+        print("   CC (Complementary Contribution, parallel)...")
+        # CC sampling has N layers (coalition sizes 0 to N-1), similar to stratified
+        cc_mc_per_coalition = max(1, k)
+        
+        cc_values = compute_cc_values(x_train, y_train, x_valid, y_valid, clf, final_model, 
+                                     utility_acc, cc_mc_per_coalition)
+        cc_mare = compute_mare(cc_values, ground_truth)
+        # CC uses N * mc_per_coalition total budget
+        cc_actual_budget = cc_mc_per_coalition
+        results.append({'k': cc_actual_budget, 'method': 'cc', 'mare': cc_mare})
+        print(f"      MARE: {cc_mare:.4f} ({cc_mare*100:.2f}%)")
+        print(f"      Actual budget: {cc_actual_budget} (target: {k})")
         
         # Simpson: t*mc = k (parallel, use existing function)
         print("   Simpson (parallel)...")
@@ -302,7 +330,7 @@ def main(visualize_sampling=False, target_point_for_viz=0):
         print(f"      Budget efficiency: {actual_avg_budget/k:.2f}")
         
         # Generate sampling visualization for one data point if requested
-        if visualize_sampling and k == 500:  # Visualize for medium budget case
+        if visualize_sampling and k == 5000:  # Visualize for medium budget case
             print(f"      Generating Smart Adaptive sampling visualization for point {target_point_for_viz}...")
             
             # Compute Smart Adaptive with sampling info for visualization
@@ -334,27 +362,130 @@ def main(visualize_sampling=False, target_point_for_viz=0):
     # 3. Create results DataFrame and plot
     results_df = pd.DataFrame(results)
     
-    # Plot results
-    plt.figure(figsize=(10, 6))
+    # Plot results with conference-style formatting
+    plt.style.use('default')  # Reset to default style
+    plt.rcParams.update({
+        'font.size': 12,
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'DejaVu Sans', 'Liberation Sans', 'sans-serif'],
+        'mathtext.fontset': 'dejavusans',
+        'axes.linewidth': 1.2,
+        'grid.linewidth': 0.8,
+        'lines.linewidth': 2.5,
+        'patch.linewidth': 0.5,
+        'xtick.major.width': 1.2,
+        'ytick.major.width': 1.2,
+        'xtick.minor.width': 0.8,
+        'ytick.minor.width': 0.8,
+        'figure.autolayout': True
+    })
+    
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
+    
+    # Professional color palette inspired by Nature/Science journals
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
+    markers = ['o', 's', '^', 'D', 'v', 'p', 'h']
+    linestyles = ['-', '--', '-.', ':', '-', '--', '-.']
+    
+    # Line widths and marker sizes for different methods
+    method_styles = {
+        'monte_carlo': {'linewidth': 3.0, 'markersize': 10},
+        'stratified': {'linewidth': 2.8, 'markersize': 9},
+        'cc': {'linewidth': 3.2, 'markersize': 10},
+        'simpson': {'linewidth': 2.6, 'markersize': 8},
+        'smart_adaptive': {'linewidth': 3.5, 'markersize': 11}
+    }
     
     methods = results_df['method'].unique()
-    for method in methods:
-        method_data = results_df[results_df['method'] == method]
-        plt.plot(method_data['k'], method_data['mare'], 'o-', label=method, linewidth=2, markersize=6)
+    method_labels = {
+        'monte_carlo': 'Monte Carlo',
+        'stratified': 'Stratified',
+        'cc': 'CC',
+        'simpson': 'Simpson Integration',
+        'smart_adaptive': 'Smart Adaptive'
+    }
     
-    plt.xlabel('Actual Sample Budget k')
-    plt.ylabel('Mean Absolute Relative Error (MARE)')
-    plt.title('MARE vs Actual Sample Budget - Cancer Dataset (Ground Truth: Stratified MC1000)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xscale('log')
-    plt.yscale('log')
+    for i, method in enumerate(methods):
+        method_data = results_df[results_df['method'] == method].sort_values('k')
+        style = method_styles.get(method, {'linewidth': 2.5, 'markersize': 8})
+        
+        ax.plot(method_data['k'], method_data['mare'], 
+                color=colors[i % len(colors)], 
+                marker=markers[i % len(markers)], 
+                linestyle=linestyles[i % len(linestyles)],
+                linewidth=style['linewidth'], 
+                markersize=style['markersize'],
+                markerfacecolor='white',
+                markeredgewidth=2.5,
+                markeredgecolor=colors[i % len(colors)],
+                label=method_labels.get(method, method.title()),
+                alpha=0.95,
+                zorder=10-i)  # Ensure important methods are on top
+    
+    # Formatting with professional appearance
+    ax.set_xlabel('Sample Budget', fontsize=15, fontweight='bold', labelpad=10)
+    ax.set_ylabel('Mean Absolute Relative Error', fontsize=15, fontweight='bold', labelpad=10)
+    
+    # Remove title for cleaner look (can be added in caption)
+    # ax.set_title('Approximation Error vs Sample Budget\n(Breast Cancer Dataset)', 
+    #             fontsize=16, fontweight='bold', pad=20)
+    
+    # Log scales with better formatting
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    
+    # Professional grid
+    ax.grid(True, which="major", alpha=0.6, linestyle='-', linewidth=0.8, color='gray')
+    ax.grid(True, which="minor", alpha=0.3, linestyle='-', linewidth=0.5, color='lightgray')
+    
+    # Enhanced legend
+    legend = ax.legend(frameon=True, fancybox=False, shadow=False, 
+                      fontsize=12, loc='upper right',
+                      framealpha=0.95, edgecolor='black', facecolor='white',
+                      borderpad=0.8, columnspacing=1.0, handlelength=2.5)
+    
+    # Professional tick formatting
+    ax.tick_params(axis='both', which='major', labelsize=13, 
+                   length=6, width=1.2, direction='in', top=True, right=True)
+    ax.tick_params(axis='both', which='minor', labelsize=11,
+                   length=3, width=0.8, direction='in', top=True, right=True)
+    
+    # Set axis limits for better visualization
+    y_min = results_df['mare'].min() * 0.7
+    y_max = results_df['mare'].max() * 1.5
+    ax.set_ylim(y_min, y_max)
+    
+    x_min = results_df['k'].min() * 0.8
+    x_max = results_df['k'].max() * 1.2
+    ax.set_xlim(x_min, x_max)
+    
+    # Professional spine formatting
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5)
+        spine.set_color('black')
+    
+    # Add subtle background
+    ax.set_facecolor('#fafafa')
+    
+    # Tight layout with padding
+    plt.tight_layout(pad=1.5)
     
     # Save results
     os.makedirs('results/plots', exist_ok=True)
     os.makedirs('results/csvs', exist_ok=True)
     
-    plt.savefig('results/plots/cancer_mare_comparison.png', dpi=300, bbox_inches='tight')
+    # Save with high quality for publication
+    plt.savefig('results/plots/cancer_mare_comparison.png', 
+                dpi=300, bbox_inches='tight', 
+                facecolor='white', edgecolor='none',
+                format='png', pad_inches=0.1)
+    
+    # Also save as PDF for LaTeX
+    plt.savefig('results/plots/cancer_mare_comparison.pdf', 
+                bbox_inches='tight', 
+                facecolor='white', edgecolor='none',
+                format='pdf', pad_inches=0.1)
+    
     plt.show()
     
     results_df.to_csv('results/csvs/cancer_mare_comparison.csv', index=False)

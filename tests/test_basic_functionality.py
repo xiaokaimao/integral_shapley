@@ -90,7 +90,7 @@ class TestBasicFunctionality(unittest.TestCase):
     
     def test_integral_methods(self):
         """Test different integral Shapley methods."""
-        methods = ['trapezoid', 'gaussian', 'adaptive']
+        methods = ['trapezoid', 'gaussian', 'smart_adaptive']
         
         for method in methods:
             with self.subTest(method=method):
@@ -100,7 +100,7 @@ class TestBasicFunctionality(unittest.TestCase):
                         kwargs = {'num_t_samples': 5, 'num_MC': 10}
                     elif method == 'gaussian':
                         kwargs = {'num_nodes': 4, 'num_MC': 10}
-                    else:  # adaptive
+                    else:  # smart_adaptive
                         kwargs = {'tolerance': 1e-2, 'num_MC': 10}
                     
                     result = compute_integral_shapley_value(
