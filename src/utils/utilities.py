@@ -4,6 +4,30 @@ from sklearn import metrics
 from sklearn.metrics import accuracy_score
 
 #########################################
+# Voting game utility
+#########################################
+
+def utility_voting_game(x_train, y_train, x_valid, y_valid, clf, final_model):
+    """
+    Utility for the weighted voting game: return 1 if the coalition weight
+    exceeds half of the total weight, else 0.
+    Assumes each row in x_train contains the player's weight.
+    """
+    if final_model is None or 'threshold' not in final_model:
+        raise ValueError("Final model must provide 'threshold' for voting game.")
+    if x_train is None or len(x_train) == 0:
+        return 0.0
+    coalition_weight = float(np.sum(x_train))
+    return 1.0 if coalition_weight > float(final_model['threshold']) else 0.0
+
+
+def utility_airport_game(x_train, y_train, x_valid, y_valid, clf, final_model):
+    """Utility = max runway requirement in the coalition."""
+    if x_train is None or len(x_train) == 0:
+        return 0.0
+    return float(np.max(x_train))
+
+#########################################
 # 1. 基于 Hilbert 空间（RKHS）的效用函数
 #########################################
 

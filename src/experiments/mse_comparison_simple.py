@@ -42,10 +42,11 @@ from src.core.shapley_interface import (
     # compute_integral_shapley_sparse_residual
 )
 from src.core.adaptive_methods import compute_integral_cc_smart_adaptive
-from src.utils.utilities import utility_acc, utility_voting_game
+from src.utils.utilities import utility_acc, utility_voting_game, utility_airport_game
 from src.utils.model_utils import return_model
 from src.utils.data_utils import load_dataset
 from src.utils.voting_utils import compute_exact_voting_shapley, get_voting_weights
+from src.utils.airport_utils import compute_exact_airport_shapley, get_airport_costs
 
 def compute_mc_single(args):
     """Compute Monte Carlo Shapley value for a single point."""
@@ -175,13 +176,17 @@ def compute_mare(predicted, ground_truth, epsilon=1e-8):
     return mare
 
 
-def load_ground_truth_from_file(clf, dataset_name, voting_weights=None):
+def load_ground_truth_from_file(clf, dataset_name, game_data=None):
     """Load ground truth from high-precision stratified sampling file"""
-    if dataset_name.lower() == "voting":
-        if voting_weights is None:
-            voting_weights = get_voting_weights()
+    dataset_name = dataset_name.lower()
+    if dataset_name == "voting":
+        weights = game_data if game_data is not None else get_voting_weights()
         print("Computing exact Shapley values for voting game...")
-        return compute_exact_voting_shapley(voting_weights)
+        return compute_exact_voting_shapley(weights)
+    if dataset_name == "airport":
+        costs = game_data if game_data is not None else get_airport_costs()
+        print("Computing exact Shapley values for airport game...")
+        return compute_exact_airport_shapley(costs)
     # pickle_file = f"results/pickles/svm_shapley_{dataset_name}_acc_monte_carlo_mc1000000.pkl"
     
     # try:
@@ -226,10 +231,13 @@ def main(visualize_sampling=False, target_point_for_viz=405):
     k_values = [500, 1000, 2000, 5000, 10000]
     
 
+
+
     x_train, x_valid, y_train, y_valid = load_dataset(args.dataset)
     dataset_name = args.dataset.lower()
     utility_func = utility_acc
     voting_weights = None
+    airport_costs = None
         
     print("Training set size:", x_train.shape)
     print("Training set type:", type(x_train), type(y_train))
@@ -241,6 +249,12 @@ def main(visualize_sampling=False, target_point_for_viz=405):
         clf = DummyClassifier(strategy='most_frequent')
         utility_func = utility_voting_game
         model = 'voting'
+    elif dataset_name == "airport":
+        airport_costs = x_train.flatten()
+        final_model = {}
+        clf = DummyClassifier(strategy='most_frequent')
+        utility_func = utility_airport_game
+        model = 'airport'
     else:
         if args.clf == 'svm':
             final_model = return_model('LinearSVC')
@@ -260,7 +274,12 @@ def main(visualize_sampling=False, target_point_for_viz=405):
     
     # 1. Load ground truth from file
     print(f"\n1. Loading ground truth from file...")
-    ground_truth = load_ground_truth_from_file(model, dataset_name, voting_weights)
+    game_data = None
+    if dataset_name == "voting":
+        game_data = voting_weights
+    elif dataset_name == "airport":
+        game_data = airport_costs
+    ground_truth = load_ground_truth_from_file(model, dataset_name, game_data)
     
     if ground_truth is None:
         print("Cannot proceed without ground truth. Exiting.")

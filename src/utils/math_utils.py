@@ -14,92 +14,95 @@ except ImportError:
     HAS_PANDAS = False
 
 
-def probabilistic_round(x, rng=None):
-    """
-    Probabilistic rounding to eliminate systematic bias.
+# def probabilistic_round(x, rng=None):
+#     """
+#     Probabilistic rounding to eliminate systematic bias.
     
-    For a float x, randomly choose between floor(x) and ceil(x) with 
-    probabilities proportional to their distances from x.
+#     For a float x, randomly choose between floor(x) and ceil(x) with 
+#     probabilities proportional to their distances from x.
     
-    Args:
-        x: Float value to round
-        rng: Random number generator (optional)
+#     Args:
+#         x: Float value to round
+#         rng: Random number generator (optional)
     
-    Returns:
-        Integer result of probabilistic rounding
+#     Returns:
+#         Integer result of probabilistic rounding
         
-    Example:
-        For x = 5.3:
-        - Returns 5 with probability 0.7 (6 - 5.3)
-        - Returns 6 with probability 0.3 (5.3 - 5)
+#     Example:
+#         For x = 5.3:
+#         - Returns 5 with probability 0.7 (6 - 5.3)
+#         - Returns 6 with probability 0.3 (5.3 - 5)
+#     """
+#     if rng is None:
+#         rng = np.random.default_rng()
+    
+#     # Handle negative numbers
+#     if x < 0:
+#         return -probabilistic_round(-x, rng)
+    
+#     # Get floor and ceiling
+#     x_floor = int(np.floor(x))
+#     x_ceil = int(np.ceil(x))
+    
+#     # If x is already an integer, return it
+#     if x_floor == x_ceil:
+#         return x_floor
+    
+#     # Calculate probability of choosing floor
+#     # P(floor) = (ceil - x) / (ceil - floor) = ceil - x (since ceil - floor = 1)
+#     prob_floor = x_ceil - x
+    
+#     # Randomly choose between floor and ceil
+#     if rng.random() < prob_floor:
+#         return x_floor
+#     else:
+#         return x_ceil
+
+
+# def deterministic_round(x, method='round'):
+#     """
+#     Deterministic rounding methods for comparison.
+    
+#     Args:
+#         x: Float value to round
+#         method: 'round', 'floor', or 'ceil'
+    
+#     Returns:
+#         Integer result of deterministic rounding
+#     """
+#     if method == 'round':
+#         return int(np.round(x))
+#     elif method == 'floor':
+#         return int(np.floor(x))
+#     elif method == 'ceil':
+#         return int(np.ceil(x))
+#     else:
+#         raise ValueError(f"Unknown rounding method: {method}")
+
+
+def compute_coalition_size(t, N_others, method='probabilistic', rng=None):
+    """
+    返回在 t 下的联盟规模 m，基于“其他样本数” N_others（= n-1）。
+    method: 'probabilistic' | 'round' | 'floor' | 'ceil'
     """
     if rng is None:
         rng = np.random.default_rng()
-    
-    # Handle negative numbers
-    if x < 0:
-        return -probabilistic_round(-x, rng)
-    
-    # Get floor and ceiling
-    x_floor = int(np.floor(x))
-    x_ceil = int(np.ceil(x))
-    
-    # If x is already an integer, return it
-    if x_floor == x_ceil:
-        return x_floor
-    
-    # Calculate probability of choosing floor
-    # P(floor) = (ceil - x) / (ceil - floor) = ceil - x (since ceil - floor = 1)
-    prob_floor = x_ceil - x
-    
-    # Randomly choose between floor and ceil
-    if rng.random() < prob_floor:
-        return x_floor
-    else:
-        return x_ceil
-
-
-def deterministic_round(x, method='round'):
-    """
-    Deterministic rounding methods for comparison.
-    
-    Args:
-        x: Float value to round
-        method: 'round', 'floor', or 'ceil'
-    
-    Returns:
-        Integer result of deterministic rounding
-    """
-    if method == 'round':
-        return int(np.round(x))
-    elif method == 'floor':
-        return int(np.floor(x))
-    elif method == 'ceil':
-        return int(np.ceil(x))
-    else:
-        raise ValueError(f"Unknown rounding method: {method}")
-
-
-def compute_coalition_size(t, N, method='probabilistic', rng=None):
-    """
-    Compute coalition size from continuous parameter t.
-    
-    Args:
-        t: Continuous parameter in [0, 1]
-        N: Total number of data points
-        method: Rounding method ('probabilistic', 'round', 'floor', 'ceil')
-        rng: Random number generator for probabilistic method
-    
-    Returns:
-        Integer coalition size in [0, N-1]
-    """
-    # Coalition is selected from N-1 candidates (excluding target point)
-    x = t * (N - 1)
-    
+    t = float(np.clip(t, 0.0, 1.0))
+    x = t * N_others
     if method == 'probabilistic':
-        return probabilistic_round(x, rng)
+        s = int(np.floor(x))
+        delta = x - s
+        if rng.random() < delta:
+            s += 1
+    elif method == 'round':
+        s = int(np.round(x))
+    elif method == 'floor':
+        s = int(np.floor(x))
+    elif method == 'ceil':
+        s = int(np.ceil(x))
     else:
-        return deterministic_round(x, method)
+        raise ValueError(f"Unknown rounding_method: {method}")
+    return int(np.clip(s, 0, N_others))
 
 
 def estimate_rounding_bias(N_values, num_trials=10000, methods=['round', 'floor', 'ceil', 'probabilistic']):

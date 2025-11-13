@@ -24,6 +24,7 @@ import itertools
 from math import factorial
 from typing import Callable, Optional
 from scipy.integrate import simpson, fixed_quad
+from scipy.interpolate import PchipInterpolator, UnivariateSpline
 from sklearn.base import clone
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
@@ -812,91 +813,6 @@ def stratified_shapley_value_with_plot(i, X_train, y_train, x_valid, y_valid, cl
     )
 
 
-def cc_shapley_nested_trapz(
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_valid: np.ndarray,
-    y_valid: np.ndarray,
-    clf,
-    final_model,
-    utility_func,
-    *,
-    num_t_samples: int = 100,   # t-grid 分辨率 (M)
-    num_MC: int = 100,          # 每个 bin 的 MC 次数
-    rng: Optional[np.random.Generator] = None
-) -> np.ndarray:
-    """
-    Complementary-Contribution Shapley (Riemann-trapz 近似)。
-    在 t ∈ (0,1) 均匀取 M 个中点，每个 bin 做 num_MC 次采样，
-    一次采样同时为所有玩家记录正反两侧的互补贡献。
-    计算量 O(M · num_MC · 训练开销)。
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    n  = x_train.shape[0]
-    M  = num_t_samples
-    indices = np.arange(n)
-
-    # -------- 1. t-grid：均匀区间完整范围 --------
-    t_grid = np.linspace(0, 1, num_t_samples, endpoint=True)  # shape = (M,)
-
-    cc_sum = np.zeros((n, M + 1))
-    cc_cnt = np.zeros((n, M + 1 ), dtype=int)
-
-    # -------- 2. 对每个 t-bin 做 MC --------
-    for idx_t, t in enumerate(t_grid):
-        # j = max(1, min(n, int(round(t * n))))    # 子集大小 ∈ [1, n]
-        j = int(np.floor(t * n))  # 子集大小 ∈ [0, n]
-        print(f"t={t:.2f}, j={j}", flush=True)
-        for _ in range(num_MC):
-            if j > 0:
-                S_idx   = rng.choice(indices, size=j, replace=False)
-            else:
-                S_idx   = np.array([], dtype=int)
-            comp_idx = np.setdiff1d(indices, S_idx, assume_unique=True)
-
-            # ---- 计算互补贡献 u = U(S) − U(N\S) ----
-            clf_s = clone(clf)
-            clf_c = clone(clf)
-
-            try:
-                u_s = utility_func(x_train[S_idx],  y_train[S_idx],
-                                       x_valid, y_valid, clf_s, final_model)
-            except:
-                u_s = 0.0
-
-            try:
-                u_c = utility_func(x_train[comp_idx], y_train[comp_idx],
-                                       x_valid, y_valid, clf_c, final_model)
-            except:
-                u_c = 0.0
-
-            u = u_s - u_c
-
-            # ---- 3. 同时更新两侧玩家 ----
-            #  (a) S 内玩家 → bin idx_t
-            cc_sum[S_idx,   idx_t] +=  u
-            cc_cnt[S_idx,   idx_t] +=  1
-
-            #  (b) 补集玩家 → bin idx_tt 对应 t' = (n-j)/n
-            idx_tt  = n - idx_t - 1
-
-            cc_sum[comp_idx, idx_tt] += -u
-            cc_cnt[comp_idx, idx_tt] +=  1
-
-    # -------- 4. 各 bin 求均值 → Riemann-trapz 积分 --------
-    cc_mean = np.full_like(cc_sum, np.nan, dtype=float)
-    mask    = cc_cnt > 0
-    cc_mean[mask] = cc_sum[mask] / cc_cnt[mask]
-
-    print(f"cc_mean.shape: {cc_mean.shape}", flush=True)
-    print(t_grid.shape, flush=True)
-    # --- 梯形积分求 Shapley ---        # M 个中点
-    sv = np.nanmean(cc_mean[:, 1:], axis=1)   # (n,)
-    return sv
-
-
 def cc_shapley(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -1118,161 +1034,6 @@ def cc_shapley_parallel(x_train: np.ndarray, y_train: np.ndarray,
     return sv
 
 
-def _cc_integral_single_sample(args):
-    """
-    Worker function for parallel CC integral sampling.
-    
-    Args:
-        args: Tuple containing (t, seed, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func)
-    
-    Returns:
-        Tuple: (t, S_idx, comp_idx, cc_value)
-    """
-    t, seed, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func = args
-    
-    # Create independent random state for this sample
-    rng = np.random.default_rng(seed)
-    n = x_train.shape[0]
-    indices = np.arange(n)
-    
-    # Convert t to coalition size using same logic as other integral methods
-    j = max(1, min(n-1, int(np.round(t * (n-1)))))
-    
-    try:
-        # Sample coalition S of size j
-        S_idx = rng.choice(indices, size=j, replace=False)
-        comp_idx = np.setdiff1d(indices, S_idx, assume_unique=True)
-        
-        # Calculate CC_N(S) = U(S) - U(N\S)
-        clf_s = clone(clf)
-        clf_c = clone(clf)
-        
-        try:
-            u_s = utility_func(x_train[S_idx], y_train[S_idx], 
-                              x_valid, y_valid, clf_s, final_model)
-        except:
-            u_s = 0.0
-            
-        try:
-            u_c = utility_func(x_train[comp_idx], y_train[comp_idx], 
-                              x_valid, y_valid, clf_c, final_model)
-        except:
-            u_c = 0.0
-            
-        cc_value = u_s - u_c
-        
-        return t, S_idx, comp_idx, cc_value
-        
-    except Exception as e:
-        # Return zero contribution if sampling fails
-        return t, np.array([]), np.array([]), 0.0
-
-
-def cc_shapley_integral_parallel(x_train: np.ndarray, y_train: np.ndarray, 
-                               x_valid: np.ndarray, y_valid: np.ndarray,
-                               clf, final_model, utility_func,
-                               num_t_samples: int = 100, num_MC: int = 100,
-                               num_processes: Optional[int] = None,
-                               rng: Optional[np.random.Generator] = None) -> np.ndarray:
-    """
-    Parallel CC Shapley using integral formulation with sampling-level parallelization.
-    
-    This method:
-    1. Creates a t-grid for numerical integration over [0,1]
-    2. For each t, performs num_MC sampling in parallel across all CPU cores
-    3. Uses complementary contribution: CC_N(S) = U(S) - U(N\\S)
-    4. Integrates the results numerically to get final Shapley values
-    
-    Args:
-        x_train, y_train: Training data
-        x_valid, y_valid: Validation data
-        clf: Classifier to train on subsets
-        final_model: Model trained on full data
-        utility_func: Utility function
-        num_t_samples: Number of integration points
-        num_MC: Monte Carlo samples per integration point
-        num_processes: Number of parallel processes (default: all CPU cores)
-        rng: Random number generator (for reproducibility)
-        
-    Returns:
-        shapley_values: Array of Shapley values for all data points
-    """
-    if num_processes is None:
-        num_processes = mp.cpu_count()
-        
-    if rng is None:
-        rng = np.random.default_rng()
-    
-    n = x_train.shape[0]
-    
-    # Create integration grid
-    t_grid = np.linspace(0.001, 0.999, num_t_samples)  # Avoid exact 0 and 1
-    
-    print(f"CC Integral Parallel: {num_t_samples} t-points, {num_MC} MC/point, {num_processes} processes")
-    print(f"Total tasks: {num_t_samples * num_MC} = {num_t_samples} × {num_MC}")
-    
-    # Generate all sampling tasks
-    all_tasks = []
-    for t in t_grid:
-        for mc_i in range(num_MC):
-            # Create unique seed for each task
-            task_seed = rng.integers(0, 2**31) ^ hash((t, mc_i)) & 0x7FFFFFFF
-            task_args = (t, task_seed, x_train, y_train, x_valid, y_valid, 
-                        clf, final_model, utility_func)
-            all_tasks.append(task_args)
-    
-    # Execute all sampling tasks in parallel
-    print(f"Starting parallel CC sampling...")
-    with mp.Pool(processes=num_processes) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(_cc_integral_single_sample, all_tasks),
-            total=len(all_tasks), 
-            desc="CC integral sampling"
-        ))
-    
-    # Organize results by t-value for integration
-    print("Processing results and computing integration...")
-    t_contributions = {}
-    for t, S_idx, comp_idx, cc_value in results:
-        if t not in t_contributions:
-            t_contributions[t] = []
-        t_contributions[t].append((S_idx, comp_idx, cc_value))
-    
-    # For each t-point, compute average marginal contributions for all players
-    integrand_matrix = np.zeros((n, len(t_grid)))  # [player, t_point]
-    
-    for t_idx, t in enumerate(t_grid):
-        if t not in t_contributions:
-            continue
-            
-        # Accumulate contributions for this t-point
-        player_contributions = np.zeros(n)
-        player_counts = np.zeros(n, dtype=int)
-        
-        for S_idx, comp_idx, cc_value in t_contributions[t]:
-            # Players in S get +cc_value
-            if len(S_idx) > 0:
-                player_contributions[S_idx] += cc_value
-                player_counts[S_idx] += 1
-            
-            # Players in complement get -cc_value  
-            if len(comp_idx) > 0:
-                player_contributions[comp_idx] += -cc_value
-                player_counts[comp_idx] += 1
-        
-        # Average the contributions for this t-point
-        mask = player_counts > 0
-        player_avg = np.zeros(n)
-        player_avg[mask] = player_contributions[mask] / player_counts[mask]
-        
-        integrand_matrix[:, t_idx] = player_avg
-    
-    # Numerical integration using trapezoidal rule
-    print("Performing numerical integration...")
-    shapley_values = np.trapezoid(integrand_matrix, t_grid, axis=1)
-    
-    print(f"CC Integral Parallel completed. Shapley values computed for {n} data points.")
-    return shapley_values
 
 
 def monte_carlo_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_model, 
@@ -1368,6 +1129,8 @@ def exact_shapley_value(i, X_train, y_train, x_valid, y_valid, clf, final_model,
     return shapley_value
 
 
+
+
 def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, final_model,
                                  utility_func, method='trapezoid', rounding_method='probabilistic', **kwargs):
     """
@@ -1380,7 +1143,7 @@ def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, f
         clf: Classifier to train on subsets  
         final_model: Model trained on full data
         utility_func: Utility function
-        method: Integration method ('trapezoid', 'simpson', 'gaussian', 'adaptive', 'smart_adaptive', 'monte_carlo', 'stratified')
+        method: Integration method ('trapezoid', 'simpson', 'gaussian', 'adaptive', 'smart_adaptive', 'monte_carlo', 'stratified', 'importance_sampling')
         rounding_method: How to round coalition sizes ('probabilistic', 'round', 'floor', 'ceil')
         **kwargs: Method-specific parameters
         
@@ -1424,6 +1187,12 @@ def compute_integral_shapley_value(x_train, y_train, x_valid, y_valid, i, clf, f
     elif method == 'stratified':
         return stratified_shapley_value(
             i, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, **kwargs
+        )
+    
+    elif method == 'sparse_residual':
+        return compute_integral_shapley_sparse_residual(
+            x_train, y_train, x_valid, y_valid, i, clf, final_model, utility_func,
+            rounding_method=rounding_method, **kwargs
         )
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -1530,11 +1299,17 @@ def compute_shapley_for_params(args):
     """Wrapper function for parallel computation of Shapley values."""
     index, x_train, y_train, x_valid, y_valid, clf, final_model, utility_func, method, rounding_method, kwargs = args
     try:
-        value = compute_integral_shapley_value(
+        result = compute_integral_shapley_value(
             x_train, y_train, x_valid, y_valid, index, clf, final_model, 
             utility_func, method=method, rounding_method=rounding_method, **kwargs
         )
-        return index, value
+        
+        # 处理稀疏残差方法的特殊返回格式
+        if method == 'sparse_residual' and isinstance(result, tuple):
+            value, info_dict = result
+            return index, value, info_dict
+        else:
+            return index, result
     except Exception as e:
         print(f"Error computing Shapley value for index {index}: {str(e)}")
         return index, f"Error: {str(e)}"
@@ -1560,13 +1335,20 @@ def main():
                        default="iris", help="Dataset to use")
     parser.add_argument("--utility", type=str, choices=["rkhs", "kl", "acc", "cosine"], 
                        default="acc", help="Utility function")
-    parser.add_argument("--method", type=str, choices=["trapezoid", "simpson", "gaussian", "adaptive", "smart_adaptive", "monte_carlo", "exact", "stratified", "cc", "cc_parallel", "cc_trapz", "cc_integral_parallel"],
+    parser.add_argument("--method", type=str, choices=["trapezoid", "simpson", "gaussian", "adaptive", "smart_adaptive", "monte_carlo", "exact", "stratified", "sparse_residual", "cc", "cc_parallel", "cc_trapz", "cc_integral_parallel"],
                        default="trapezoid", help="Integration method (note: 'adaptive' redirects to 'smart_adaptive')")
     parser.add_argument("--clf", choices=["svm", "lr"], default="svm", help="Base classifier")
     parser.add_argument("--num_t_samples", type=int, default=50, help="Number of t samples for integration")
     parser.add_argument("--num_MC", type=int, default=100, help="Monte Carlo samples per t value")
     parser.add_argument("--num_nodes", type=int, default=32, help="Gaussian quadrature nodes")
     parser.add_argument("--tolerance", type=float, default=1e-4, help="Convergence tolerance for adaptive method")
+    
+    # 稀疏残差方法专用参数
+    parser.add_argument("--sparse_nodes", type=int, default=8, help="Number of Chebyshev nodes for sparse residual method")
+    parser.add_argument("--residual_samples", type=int, default=100, help="Number of residual correction samples")
+    parser.add_argument("--fitting_method", type=str, choices=["pchip", "spline"], default="pchip", 
+                       help="Fitting method for sparse residual (pchip or spline)")
+    
     parser.add_argument("--processes", type=int, default=mp.cpu_count(), help="Number of processes")
     parser.add_argument("--single_point", type=int, default=None, help="Compute for single data point (default: all points)")
     parser.add_argument("--rounding_method", type=str, choices=["probabilistic", "round", "floor", "ceil"],
@@ -1628,6 +1410,14 @@ def main():
         method_kwargs = {'num_samples': args.num_MC}
     elif args.method == 'stratified':
         method_kwargs = {'num_MC': args.num_MC}
+    elif args.method == 'sparse_residual':
+        method_kwargs = {
+            'num_nodes': args.sparse_nodes,
+            'num_MC_per_node': args.num_MC,
+            'residual_samples': args.residual_samples,
+            'fitting_method': args.fitting_method,
+            'return_detailed_info': True  # 总是返回详细信息以便分析
+        }
     elif args.method in ['cc', 'cc_parallel', 'cc_trapz', 'cc_integral_parallel']:
         method_kwargs = {'num_MC': args.num_MC}
         if args.method == 'cc_parallel':
@@ -1676,12 +1466,35 @@ def main():
         print(f"Using {args.processes} processes to compute {len(target_indices)} Shapley values with {args.method} method...")
         
         raw_results = {}
-        with mp.Pool(processes=args.processes) as pool:
-            for index, value in tqdm(pool.imap_unordered(compute_shapley_for_params, process_args),
-                                   total=len(process_args), desc=f"Computing {args.method} Shapley values"):
-                raw_results[index] = value
+        detailed_info = {}  # 存储稀疏残差方法的详细信息
         
-        results = {args.method.title(): np.array([raw_results[i] for i in sorted(target_indices)])}
+        with mp.Pool(processes=args.processes) as pool:
+            for result in tqdm(pool.imap_unordered(compute_shapley_for_params, process_args),
+                             total=len(process_args), desc=f"Computing {args.method} Shapley values"):
+                if len(result) == 3:  # 稀疏残差方法返回 (index, value, info_dict)
+                    index, value, info_dict = result
+                    raw_results[index] = value
+                    detailed_info[index] = info_dict
+                else:  # 其他方法返回 (index, value)
+                    index, value = result
+                    raw_results[index] = value
+        
+        values_array = np.array([raw_results[i] for i in sorted(target_indices)])
+        results = {args.method.title(): values_array}
+        
+        # 如果是稀疏残差方法，打印详细信息
+        if args.method == 'sparse_residual' and detailed_info:
+            print(f"\n稀疏残差方法详细信息:")
+            for idx in sorted(target_indices):
+                if idx in detailed_info:
+                    info = detailed_info[idx]
+                    print(f"  数据点 {idx}:")
+                    print(f"    主积分: {info['main_integral']:.6f}")
+                    print(f"    残差校正: {info['residual_correction']:.6f} ± {info['residual_std']:.6f}")
+                    print(f"    总评估次数: {info['total_function_evaluations']}")
+                    print(f"    拟合方法: {info['fitting_method']}")
+                    print(f"    节点数: {info['num_nodes']}")
+                    print()
 
     # Print results
     print(f"\nDataset: {args.dataset}")
@@ -1711,6 +1524,520 @@ def main():
     with open(pkl_filename, "wb") as f:
         pickle.dump(results, f)
     print(f"\nResults saved to {pkl_filename}")
+
+
+
+# ============================================================================
+# 稀疏积分 + 无偏残差方法 (Sparse Integration + Unbiased Residual Correction)
+# ============================================================================
+
+def generate_chebyshev_nodes_with_endpoints(m_inner, interval=(0, 1)):
+    """
+    生成包含端点的 Chebyshev 节点
+    
+    Args:
+        m_inner: 内部 Chebyshev 节点数量
+        interval: 目标区间，默认 (0, 1)
+        
+    Returns:
+        nodes: 包含端点的 Chebyshev 节点数组，总数 = m_inner + 2
+    """
+    if m_inner < 0:
+        raise ValueError("m_inner must be non-negative")
+    
+    if m_inner == 0:
+        # 只返回端点
+        return np.array([interval[0], interval[1]])
+    
+    # 生成内部 Chebyshev 节点
+    inner_nodes = generate_chebyshev_nodes(m_inner, interval)
+    
+    # 添加端点
+    a, b = interval
+    all_nodes = np.concatenate(([a], inner_nodes, [b]))
+    
+    # 去重并排序
+    nodes = np.unique(np.clip(all_nodes, a, b))
+    return np.sort(nodes)
+
+
+def generate_chebyshev_nodes(m, interval=(0, 1)):
+    """
+    生成 [0,1] 区间上的 Chebyshev 节点
+    
+    Args:
+        m: 节点数量
+        interval: 目标区间，默认 (0, 1)
+        
+    Returns:
+        nodes: Chebyshev 节点数组
+    """
+    # 生成标准 [-1, 1] 区间的 Chebyshev 节点
+    nodes_std = np.cos(np.pi * (2 * np.arange(m) + 1) / (2 * m))
+    
+    # 映射到目标区间
+    a, b = interval
+    nodes = (nodes_std + 1) / 2 * (b - a) + a
+    
+    return np.sort(nodes)  # 从小到大排序
+
+
+def fit_smooth_approximation(t_nodes, E_values, method='pchip'):
+    """
+    在节点上拟合光滑近似函数 h(t)
+    
+    Args:
+        t_nodes: t 节点数组
+        E_values: 对应的 E[Δ(t,i)] 估计值
+        method: 拟合方法 ('pchip', 'spline')
+        
+    Returns:
+        h_func: 拟合的函数对象
+    """
+    if method == 'pchip':
+        # PCHIP 单调三次样条，适合单调函数
+        h_func = PchipInterpolator(t_nodes, E_values, extrapolate=True)
+    elif method == 'spline':
+        # 三次样条
+        h_func = UnivariateSpline(t_nodes, E_values, s=0, ext='extrapolate')
+    else:
+        raise ValueError(f"Unknown fitting method: {method}")
+    
+    return h_func
+
+
+def compute_integral_and_segment_means(h_func, n, interval=(0, 1)):
+    """
+    一次性计算拟合函数的积分和各段平均值
+    
+    Args:
+        h_func: 拟合的函数对象
+        n: 数据集大小
+        interval: 积分区间
+        
+    Returns:
+        integral_value: 总积分值
+        a_s: 每个分段的平均值数组
+    """
+    a, b = interval
+    
+    # 优先使用对象自带的高效积分方法
+    if hasattr(h_func, "integrate"):  # PchipInterpolator
+        integral_value = h_func.integrate(a, b)
+        a_s = np.array([n * h_func.integrate(s/n, (s+1)/n) for s in range(n)])
+    elif hasattr(h_func, "integral"):  # UnivariateSpline
+        integral_value = h_func.integral(a, b)
+        a_s = np.array([n * h_func.integral(s/n, (s+1)/n) for s in range(n)])
+    else:  # 兜底使用数值积分
+        from scipy.integrate import quad
+        integral_value, _ = quad(h_func, a, b)
+        a_s = np.array([n * quad(h_func, s/n, (s+1)/n)[0] for s in range(n)])
+    
+    return integral_value, a_s
+
+
+def generate_sparse_warmup_sizes(n, num_warmup=32):
+    """
+    生成稀疏预热的尺寸集合
+    
+    Args:
+        n: 数据集大小
+        num_warmup: 预热尺寸数量
+        
+    Returns:
+        warmup_sizes: 预热尺寸数组
+    """
+    # 端点 + Chebyshev 尺寸 + 等距尺寸
+    if n <= num_warmup:
+        return np.arange(n)
+    
+    # 端点
+    sizes = [0, n-1]
+    
+    # Chebyshev 尺寸（映射到 [0, n-1]）
+    cheb_t = generate_chebyshev_nodes(min(num_warmup-4, n-2), interval=(0, 1))
+    cheb_sizes = np.round(cheb_t * (n-1)).astype(int)
+    sizes.extend(cheb_sizes)
+    
+    # 等距尺寸
+    num_uniform = max(num_warmup - len(sizes), 0)
+    if num_uniform > 0:
+        uniform_sizes = np.linspace(0, n-1, num_uniform, dtype=int)
+        sizes.extend(uniform_sizes)
+    
+    # 去重并排序
+    sizes = np.unique(np.array(sizes))
+    return sizes[sizes < n]  # 确保所有尺寸都在有效范围内
+
+
+def estimate_residual_sampling_distribution_sparse(x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                                                  utility_func, a_s, num_warmup=32, warmup_samples=5, 
+                                                  lambda_eps=1e-8, rng=None):
+    """
+    使用稀疏预热估计残差重要性采样分布
+    
+    Args:
+        x_train, y_train: 训练数据
+        x_valid, y_valid: 验证数据
+        i: 目标数据点索引
+        clf: 分类器
+        final_model: 完整模型
+        utility_func: 效用函数
+        a_s: 拟合函数的段平均值
+        num_warmup: 预热尺寸数量
+        warmup_samples: 每个尺寸的预热样本数
+        lambda_eps: 最小概率下界
+        rng: 随机数生成器
+        
+    Returns:
+        p_s: 采样概率分布
+        warmup_evaluations: 预热阶段的函数评估次数
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    n = len(x_train)
+    candidate_indices = np.arange(n)[np.arange(n) != i]
+    
+    # 生成稀疏预热尺寸
+    warmup_sizes = generate_sparse_warmup_sizes(n, num_warmup)
+    
+    # 在预热尺寸上估计方差和偏差
+    sigma_warmup = {}
+    bias_warmup = {}
+    evaluation_count = 0
+    
+    for s in warmup_sizes:
+        delta_values = []
+        
+        if s == 0:
+            # s=0 时，S 为空集
+            try:
+                u_empty = utility_func(np.array([]).reshape(0, -1), np.array([]), 
+                                     x_valid, y_valid, final_model, final_model)
+                u_with_i = utility_func(x_train[i:i+1], y_train[i:i+1], 
+                                      x_valid, y_valid, final_model, final_model)
+                delta_values = [u_with_i - u_empty]
+                evaluation_count += 2  # 两次效用函数调用
+            except:
+                continue  # 跳过失败的计算，不污染分布
+                
+        elif s == n-1:
+            # s=n-1 时，S = N\{i}（唯一子集）
+            try:
+                X_without_i = x_train[candidate_indices]
+                y_without_i = y_train[candidate_indices]
+                model_without_i = clone(clf)
+                model_without_i.fit(X_without_i, y_without_i)
+                u_without_i = utility_func(X_without_i, y_without_i, x_valid, y_valid, 
+                                         model_without_i, final_model)
+                u_full = utility_func(x_train, y_train, x_valid, y_valid, final_model, final_model)
+                delta_values = [u_full - u_without_i]
+                evaluation_count += 2  # 两次效用函数调用
+            except:
+                continue
+                
+        else:
+            # 一般情况：随机采样若干个大小为 s 的子集
+            for _ in range(warmup_samples):
+                try:
+                    subset_indices = rng.choice(candidate_indices, size=s, replace=False)
+                    
+                    # 训练不包含 i 的子集模型
+                    X_subset = x_train[subset_indices]
+                    y_subset = y_train[subset_indices]
+                    model_subset = clone(clf)
+                    model_subset.fit(X_subset, y_subset)
+                    u_subset = utility_func(X_subset, y_subset, x_valid, y_valid, 
+                                          model_subset, final_model)
+                    
+                    # 训练包含 i 的子集模型
+                    subset_with_i = np.concatenate([subset_indices, [i]])
+                    X_subset_with_i = x_train[subset_with_i]
+                    y_subset_with_i = y_train[subset_with_i]
+                    model_subset_with_i = clone(clf)
+                    model_subset_with_i.fit(X_subset_with_i, y_subset_with_i)
+                    u_subset_with_i = utility_func(X_subset_with_i, y_subset_with_i, 
+                                                 x_valid, y_valid, model_subset_with_i, final_model)
+                    
+                    delta = u_subset_with_i - u_subset
+                    delta_values.append(delta)
+                    evaluation_count += 2  # 两次效用函数调用
+                except:
+                    continue  # 跳过失败的计算
+        
+        # 计算统计量（只有成功的样本）
+        if len(delta_values) > 0:
+            E_s_est = np.mean(delta_values)
+            sigma_warmup[s] = np.std(delta_values, ddof=1) if len(delta_values) > 1 else 0
+            bias_warmup[s] = abs(E_s_est - a_s[s])
+        else:
+            # 如果没有成功的样本，使用保守估计
+            sigma_warmup[s] = 1.0  # 保守的标准差
+            bias_warmup[s] = abs(a_s[s])
+    
+    # 插值到所有尺寸
+    sigma_s = np.zeros(n)
+    bias_s = np.zeros(n)
+    
+    warmup_s_list = np.array(list(sigma_warmup.keys()))
+    sigma_values = np.array([sigma_warmup[s] for s in warmup_s_list])
+    bias_values = np.array([bias_warmup[s] for s in warmup_s_list])
+    
+    if len(warmup_s_list) > 1:
+        # 使用 PCHIP 单调样条插值，更稳定不振荡
+        try:
+            sigma_interp = PchipInterpolator(warmup_s_list, sigma_values, extrapolate=True)
+            bias_interp = PchipInterpolator(warmup_s_list, bias_values, extrapolate=True)
+            sigma_s = sigma_interp(np.arange(n))
+            bias_s = bias_interp(np.arange(n))
+            # 确保插值结果为非负
+            sigma_s = np.maximum(sigma_s, 0)
+            bias_s = np.maximum(bias_s, 0)
+        except Exception:
+            # 如果PCHIP失败，使用线性插值作为备份
+            sigma_s = np.interp(np.arange(n), warmup_s_list, sigma_values)
+            bias_s = np.interp(np.arange(n), warmup_s_list, bias_values)
+    elif len(warmup_s_list) == 1:
+        # 只有一个点，使用常数
+        sigma_s.fill(sigma_values[0])
+        bias_s.fill(bias_values[0])
+    else:
+        # 没有成功的预热，使用均匀分布
+        sigma_s.fill(1.0)
+        bias_s = np.abs(a_s)
+    
+    # 计算重要性采样权重
+    weights = np.sqrt(sigma_s**2 + bias_s**2) + lambda_eps
+    p_s = weights / np.sum(weights)
+    
+    return p_s, evaluation_count
+
+
+def compute_residual_correction(x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                              utility_func, a_s, p_s, K=100, rng=None):
+    """
+    计算残差校正项：E[∫₀¹ (f*(t) - h(t)) dt] 的重要性采样估计
+    
+    优化：预计算端点delta值，避免重复训练
+    
+    Args:
+        x_train, y_train: 训练数据
+        x_valid, y_valid: 验证数据
+        i: 目标数据点索引
+        clf: 分类器
+        final_model: 完整模型
+        utility_func: 效用函数
+        a_s: 拟合函数的段平均值数组
+        p_s: 采样分布
+        K: 残差采样次数
+        rng: 随机数生成器
+        
+    Returns:
+        residual_estimate: 残差估计值
+        residual_std: 残差估计的标准误差
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    n = len(x_train)
+    idx_wo_i = np.arange(n) != i
+    candidate_indices = np.arange(n)[idx_wo_i]
+    
+    # ===== 端点预计算 =====
+    # s=0 的情况
+    try:
+        u_empty = utility_func(np.empty((0, x_train.shape[1])), np.empty((0,)), 
+                               x_valid, y_valid, final_model, final_model)
+        u_with_i = utility_func(x_train[i:i+1], y_train[i:i+1],
+                                x_valid, y_valid, final_model, final_model)
+        delta_s0 = u_with_i - u_empty
+    except Exception:
+        delta_s0 = 0.0
+    
+    # s=n-1 的情况
+    try:
+        X_wo = x_train[candidate_indices]
+        y_wo = y_train[candidate_indices]
+        m_wo = clone(clf)
+        m_wo.fit(X_wo, y_wo)
+        u_wo = utility_func(X_wo, y_wo, x_valid, y_valid, m_wo, final_model)
+        u_full = utility_func(x_train, y_train, x_valid, y_valid, final_model, final_model)
+        delta_sn1 = u_full - u_wo
+    except Exception:
+        delta_sn1 = 0.0
+    
+    # ===== 重要性采样 =====
+    residual_samples = []
+    successes = 0
+    attempts = 0
+    max_attempts = K * 3  # 防止无限循环，最多尝试3倍
+    
+    while successes < K and attempts < max_attempts:
+        attempts += 1
+        # 按分布 p_s 采样尺寸 s
+        s = rng.choice(n, p=p_s)
+        
+        try:
+            if s == 0:
+                delta = delta_s0  # 使用预计算值
+            elif s == n-1:
+                delta = delta_sn1  # 使用预计算值
+            else:
+                # 一般情况：随机采样大小为 s 的子集
+                subset_indices = rng.choice(candidate_indices, size=s, replace=False)
+                
+                # 训练不包含 i 的子集模型
+                X_subset = x_train[subset_indices]
+                y_subset = y_train[subset_indices]
+                model_subset = clone(clf)
+                model_subset.fit(X_subset, y_subset)
+                u_subset = utility_func(X_subset, y_subset, x_valid, y_valid, 
+                                      model_subset, final_model)
+                
+                # 训练包含 i 的子集模型
+                subset_with_i = np.concatenate([subset_indices, [i]])
+                X_subset_with_i = x_train[subset_with_i]
+                y_subset_with_i = y_train[subset_with_i]
+                model_subset_with_i = clone(clf)
+                model_subset_with_i.fit(X_subset_with_i, y_subset_with_i)
+                u_subset_with_i = utility_func(X_subset_with_i, y_subset_with_i, 
+                                             x_valid, y_valid, model_subset_with_i, final_model)
+                
+                delta = u_subset_with_i - u_subset
+            
+            # 计算重要性采样权重
+            Y = (delta - a_s[s]) / (n * p_s[s])
+            residual_samples.append(Y)
+            successes += 1
+            
+        except Exception:
+            # 失败时直接重试，不添加0，保持无偏性
+            continue
+    
+    # 如果成功样本不足，记录警告但仍计算
+    if successes < K:
+        print(f"警告: 残差采样只成功 {successes}/{K} 次")
+    
+    if successes == 0:
+        # 极端情况：所有采样都失败
+        residual_estimate = 0.0
+        residual_std = 0.0
+    else:
+        residual_samples = np.asarray(residual_samples)
+        residual_estimate = float(residual_samples.mean())
+        residual_std = (float(residual_samples.std(ddof=1) / np.sqrt(successes)) if successes > 1 else 0.0)
+    
+    return residual_estimate, residual_std
+
+
+def compute_integral_shapley_sparse_residual(x_train, y_train, x_valid, y_valid, i, clf, final_model,
+                                           utility_func, num_nodes=8, num_MC_per_node=50, 
+                                           residual_samples=100, fitting_method='pchip',
+                                           rounding_method='probabilistic', warmup_per_node=5,
+                                           lambda_eps=1e-8, return_detailed_info=False, rng=None):
+    """
+    稀疏积分 + 无偏残差方法计算 Shapley 值（优化版本）
+    
+    核心思想：
+    SV_i = ∫₀¹ h(t) dt + ∫₀¹ [f*(t) - h(t)] dt
+           ^主积分(解析)    ^残差(重要性采样校正)
+    
+    优化：
+    - 使用包含端点的 Chebyshev 节点
+    - 一次性计算积分和段平均值
+    - 稀疏预热估计采样分布，复杂度从 O(n) 降到 O(num_warmup)
+    - 修正 off-by-one 错误
+    
+    Args:
+        x_train, y_train: 训练数据
+        x_valid, y_valid: 验证数据
+        i: 目标数据点索引
+        clf: 分类器
+        final_model: 完整模型
+        utility_func: 效用函数
+        num_nodes: Chebyshev 节点数量 (m << n)
+        num_MC_per_node: 每个节点的 MC 采样次数
+        residual_samples: 残差校正的采样次数 K
+        fitting_method: 拟合方法 ('pchip', 'spline')
+        rounding_method: 联盟大小舍入方法
+        warmup_per_node: 预热阶段每个节点的采样数
+        lambda_eps: 采样概率下界
+        return_detailed_info: 是否返回详细信息
+        rng: 随机数生成器
+        
+    Returns:
+        如果 return_detailed_info=False: shapley_value
+        如果 return_detailed_info=True: (shapley_value, info_dict)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    n = len(x_train)
+    
+    # ===== 第一阶段：稀疏节点拟合 =====
+    
+    # 1) 生成包含端点的 Chebyshev 节点
+    t_nodes = generate_chebyshev_nodes_with_endpoints(max(num_nodes-2, 0), interval=(0, 1))
+    
+    # 2) 在每个节点高精度估计 E[Δ(t,i)]
+    print(f"稀疏积分: 在 {len(t_nodes)} 个 Chebyshev 节点（含端点）上估计积分函数...")
+    E_values = []
+    for t in t_nodes:
+        marginal_contrib = compute_marginal_contribution_at_t(
+            t, x_train, y_train, x_valid, y_valid, i, clf, final_model,
+            utility_func, num_MC_per_node, rounding_method, rng
+        )
+        E_values.append(marginal_contrib)
+    
+    E_values = np.array(E_values)
+    
+    # 3) 拟合光滑函数 h(t)
+    print(f"拟合光滑近似函数 (方法: {fitting_method})...")
+    h_func = fit_smooth_approximation(t_nodes, E_values, method=fitting_method)
+    
+    # 4) 一次性计算主积分和段平均值
+    print("计算主积分和段平均值...")
+    main_integral, a_s = compute_integral_and_segment_means(h_func, n, interval=(0, 1))
+    
+    # ===== 第二阶段：残差校正 =====
+    
+    # 5) 稀疏预热估计最优重要性采样分布
+    print("稀疏预热估计残差重要性采样分布...")
+    p_s, warmup_evaluations = estimate_residual_sampling_distribution_sparse(
+        x_train, y_train, x_valid, y_valid, i, clf, final_model,
+        utility_func, a_s, num_warmup=min(32, n), warmup_samples=warmup_per_node, 
+        lambda_eps=lambda_eps, rng=rng
+    )
+    
+    # 6) 计算残差校正
+    print(f"计算残差校正 (采样 {residual_samples} 次)...")
+    residual_correction, residual_std = compute_residual_correction(
+        x_train, y_train, x_valid, y_valid, i, clf, final_model,
+        utility_func, a_s, p_s, K=residual_samples, rng=rng
+    )
+    
+    # ===== 最终结果 =====
+    shapley_value = main_integral + residual_correction
+    
+    if return_detailed_info:
+        info_dict = {
+            'main_integral': main_integral,
+            'residual_correction': residual_correction,
+            'residual_std': residual_std,
+            'num_nodes': len(t_nodes),
+            'num_MC_per_node': num_MC_per_node,
+            'residual_samples': residual_samples,
+            't_nodes': t_nodes,
+            'E_values': E_values,
+            'fitting_method': fitting_method,
+            'sampling_distribution': p_s,
+            'warmup_evaluations': warmup_evaluations,
+            'total_function_evaluations': len(t_nodes) * num_MC_per_node + warmup_evaluations + residual_samples
+        }
+        return shapley_value, info_dict
+    else:
+        return shapley_value
 
 
 if __name__ == "__main__":
