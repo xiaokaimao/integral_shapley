@@ -717,13 +717,7 @@ def main(visualize_sampling=False, target_point_for_viz=405):
     # Save results
     os.makedirs('results/plots', exist_ok=True)
     os.makedirs('results/csvs', exist_ok=True)
-    
-    # Save with high quality for publication
-    plt.savefig(f'results/plots/{args.dataset}_mare_comparison_t{args.t}.png', 
-                dpi=300, bbox_inches='tight', 
-                facecolor='white', edgecolor='none',
-                format='png', pad_inches=0.1)
-    
+        
     # Also save as PDF for LaTeX
     plt.savefig(f'results/plots/{args.clf}_{args.dataset}_mare_comparison_t{args.t}.pdf', 
                 bbox_inches='tight', 
